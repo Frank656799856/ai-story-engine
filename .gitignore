@@ -1,0 +1,16 @@
+# 密钥与私密配置（绝不入库）
+config.txt
+
+# 复制残留死副本（agent 包嵌套，代码零引用；磁盘暂留，不入库）
+agent/agent/
+
+# 运行时数据：副本存档 / 记忆 / 日志（全部由程序生成）
+data/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 系统杂项
+.DS_Store
+Thumbs.db
