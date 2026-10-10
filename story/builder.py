@@ -297,7 +297,7 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
         tone=tone,
         extra_block=extra_block,
     )
-    raw = client.chat(system_prompt=system, user_message=user, temperature=0.85, max_tokens=4096)
+    raw = client.chat(system_prompt=system, user_message=user, temperature=0.85, max_tokens=8192)
     story = _extract_json(raw)
 
     # ── 2. 结构校验：失败回喂修复重试一次 ──
@@ -308,7 +308,7 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
             story_json=json.dumps(story, ensure_ascii=False, indent=2),
             problems="\n".join(f"- {e}" for e in errors),
         )
-        raw = client.chat(system_prompt=system, user_message=fix_user, temperature=0.4, max_tokens=4096)
+        raw = client.chat(system_prompt=system, user_message=fix_user, temperature=0.4, max_tokens=8192)
         story = _extract_json(raw)
         errors = schema.validate_story(story)
         if errors:
@@ -340,7 +340,7 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
             story_json=json.dumps(story, ensure_ascii=False, indent=2),
             problems="\n".join(f"- {i}" for i in issues) or "-（责编未给出具体问题，请整体润色提升开篇钩子与冲突张力）",
         )
-        raw = client.chat(system_prompt=system, user_message=revise_user, temperature=0.7, max_tokens=4096)
+        raw = client.chat(system_prompt=system, user_message=revise_user, temperature=0.7, max_tokens=8192)
         try:
             revised = _extract_json(raw)
         except (ValueError, json.JSONDecodeError):
@@ -365,6 +365,8 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
         }
     # 搜索开关（8.16 资料桥：本次生成是否走了外源检索）
     story["research_enabled"] = bool((settings or {}).get("research_enabled"))
+    # 8.26b 副本类型规则：生存型启用血条/饥饿/死亡判定；剧情型零感知（默认）
+    story["rules"] = {"survival": bool((settings or {}).get("survival"))}
     # 外源检索资料（8.16）：结构化存档，供导演游玩注入（build_injection 按 NPC/地点过滤预算）
     story["research_summary"] = research_summary
     story["review_notes"] = review_notes

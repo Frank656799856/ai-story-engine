@@ -58,6 +58,12 @@
             color: var(--accent); font-size: 13px; cursor: pointer;
         }
         .btn-ghost:hover { background: var(--brand-hover); }
+        .btn-danger {
+            margin-top: 16px; padding: 8px 22px; border-radius: 8px;
+            border: 1px solid #e4b6b6; background: #ffffff;
+            color: #b44141; font-size: 13px; cursor: pointer;
+        }
+        .btn-danger:hover { background: #fbeeee; }
         .center { text-align: center; }
         /* 生成中动画（纯 CSS） */
         .spinner {
@@ -120,6 +126,9 @@
         /* 灰色 chip：不同地点的 NPC 不可对话（8.12） */
         .chip.disabled { opacity: 0.45; cursor: not-allowed; border-color: #cccccc; color: #999999; background: #f2f2f2; }
         .chip.disabled:hover { border-color: #cccccc; background: #f2f2f2; }
+        /* 死亡 chip：暗红底+删除线，永久退场（8.26d） */
+        .chip.dead { opacity: 0.55; cursor: not-allowed; border-color: #d9a0a0; color: #8a4a4a; background: #f7ecec; text-decoration: line-through; }
+        .chip.dead:hover { border-color: #d9a0a0; background: #f7ecec; }
         /* chip 私聊开关（8.13） */
         .priv-btn {
             margin-left: -8px; padding: 5px 9px; border-radius: 16px; z-index: 1;
@@ -381,6 +390,39 @@
         .hb-note { padding: 6px 10px; border-left: 3px solid var(--accent); background: #f6f9fd; border-radius: 0 8px 8px 0; margin-bottom: 6px; }
         .hb-note .n-meta { color: var(--muted); font-size: 11px; }
         .hb-note .n-text { font-size: 13px; color: var(--text); line-height: 1.5; margin-top: 2px; }
+        /* 8.26 背包（MC 风格：暗格=已占+数量，浅格=空）与生存状态条 */
+        .mode-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+        .mode-opt { font-size: 12.5px; color: var(--text); display: flex; align-items: center; gap: 6px; }
+        .bag-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin: 8px 0; }
+        .bag-cell { aspect-ratio: 1; background: #eef0f3; border: 1px solid #dde1e6; border-radius: 6px; position: relative; display: flex; align-items: center; justify-content: center; }
+        .bag-cell.filled { background: #565e6b; border-color: #3c434d; color: #fff; }
+        .bag-cell.filled.key { border-color: #e6a23c; box-shadow: 0 0 0 1px #e6a23c inset; }
+        .bag-name { font-size: 12px; font-weight: 600; }
+        .bag-count { position: absolute; right: 3px; bottom: 1px; font-size: 11px; color: #ffe9b8; }
+        .bag-meta { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .bag-sync { border: 1px solid #dde1e6; background: #fff; border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; color: var(--text); }
+        /* 9.2 交流动作条 + 双手槽 */
+        .act-bar { display: flex; align-items: center; gap: 6px; padding: 6px 20px; background: var(--panel); border-top: 1px solid var(--line); flex-shrink: 0; flex-wrap: wrap; }
+        .act-chip { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; color: var(--text); }
+        .act-chip:hover { background: var(--brand-hover); }
+        .act-tip { font-size: 12px; color: var(--muted); }
+        .act-hint { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+        .hand-row { display: flex; align-items: center; gap: 6px; margin: 2px 0 8px; }
+        .hand-label { font-size: 12px; color: var(--muted); }
+        .hand-slot { width: 34px; height: 34px; border-radius: 6px; display: flex; align-items: center; justify-content: center; position: relative; }
+        .hand-slot.empty { background: #eef0f3; border: 1px dashed #c8cdd4; }
+        .hand-slot.filled { background: #565e6b; border: 1px solid #3c434d; color: #fff; cursor: pointer; }
+        .hand-slot.filled.key { border-color: #e6a23c; box-shadow: 0 0 0 1px #e6a23c inset; }
+        .hand-slot .bag-name { font-size: 12px; font-weight: bold; }
+        .hand-slot .hand-empty { font-size: 11px; color: #9aa2ad; }
+        .hand-tip { font-size: 11.5px; color: var(--muted); }
+        .hand-pick { font-size: 12.5px; color: var(--text); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+        .surv-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0; color: var(--text); }
+        .surv-row span { white-space: nowrap; }
+        .surv-bar { flex: 1; height: 10px; background: #eef0f3; border-radius: 5px; overflow: hidden; }
+        .surv-fill { height: 100%; border-radius: 5px; }
+        .surv-fill.hp { background: #e05252; }
+        .surv-fill.hg { background: #e6a23c; }
         .hb-empty { color: var(--muted); font-size: 12px; padding: 4px 0 8px; }
 
         /* ===== 响应式：窄屏适配 ===== */
@@ -465,6 +507,11 @@
                 </div>
                 <details class="adv-box">
                     <summary>高级选项（全部选填，可细化你要的世界）</summary>
+                    <label>副本类型</label>
+                    <div class="mode-row">
+                        <label class="mode-opt"><input type="radio" name="storyMode" id="modeStory" checked> 剧情型（默认：任务与秘密驱动，无血条饥饿）</label>
+                        <label class="mode-opt"><input type="radio" name="storyMode" id="modeSurvival"> 生存型（启用血条/饥饿/死亡判定，饥饿归零会掉血）</label>
+                    </div>
                     <label>副本名称</label>
                     <input type="text" id="titleHint" placeholder="留空 = AI 自拟标题">
                     <label>你的角色（玩家身份）</label>
@@ -540,7 +587,7 @@
                 <span id="playTitle" class="title"></span>
                 <span id="playScene" class="scene"></span>
                 <button id="handbookBtn" class="pause-btn" type="button" title="身份卡 · 任务进度 · 重要信息">📖 手册</button>
-                <button id="questToggleBtn" class="quest-btn" type="button" title="任务与游览路线">📋 任务 <span id="questBadge" class="quest-badge hidden"></span></button>
+                <button id="questToggleBtn" class="quest-btn" type="button" title="任务面板">📋 任务 <span id="questBadge" class="quest-badge hidden"></span></button>
                 <button id="pauseBtn" class="pause-btn" type="button">菜单</button>
             </div>
             <div class="status-row">
@@ -563,6 +610,14 @@
             </div>
         </header>
         <main id="messages" class="messages"></main>
+        <div class="act-bar">
+            <span class="act-tip">交流动作：</span>
+            <button type="button" class="act-chip" data-act="套话">💬 套话</button>
+            <button type="button" class="act-chip" data-act="施压">⚡ 施压</button>
+            <button type="button" class="act-chip" data-act="示好">🤝 示好</button>
+            <button type="button" class="act-chip" data-act="沉默">🤐 沉默</button>
+            <span class="act-hint">点击填入指令，可改可发；出示物品=在背包里拿在手上</span>
+        </div>
         <footer class="input-area">
             <input id="chatInput" type="text" placeholder="在场所有人都会听到你说话…" autocomplete="off">
             <button id="sendBtn" type="button">发送</button>
@@ -578,6 +633,8 @@
                 <button id="pauseResume" class="btn-primary" type="button">继续游戏</button>
                 <button id="pauseBg" class="btn-ghost" type="button">更换背景图</button>
                 <button id="pauseExit" class="btn-ghost" type="button">回到存档选择</button>
+                <button id="pauseRestart" class="btn-danger" type="button">🔄 重新开始（开并行副本）</button>
+                <div class="form-error">重新开始会开一个全新的并行存档：新副本回到刚生成时的初始状态，原副本及其全部进度原封保留在存档列表里。</div>
             </div>
         </div>
     </div>
@@ -631,6 +688,7 @@
 
     <script>
 /* 剧情副本前端逻辑（story.js）— 单页三视图：设置 → 生成 → 游玩
+ * [同步标记] 2026-10-10 以 story.js 当前内容全量重同步（9.2 双手槽+交流动作）。
  *
  * 重要说明（加载方式）：
  * 本文件是前端脚本的"规范源码"，与 story.html 内嵌的脚本块保持同一份实现。
@@ -924,6 +982,7 @@
             npc_hints: $('npcHints').value.trim(),
             ending_hint: $('endingHint').value.trim(),
             extra_req: $('extraReq').value.trim(),
+            survival: $('modeSurvival').checked,
             research_enabled: $('researchSwitch').value === 'on'
         };
         if (!settings.world_desc) {
@@ -931,6 +990,25 @@
             return;
         }
         hideSetupError();
+        // 8.25 检索建议：未开检索开关时先问 AI——陌生世界观（现实 IP/真实历史/专业领域）
+        // 强烈建议先检索资料再生成；判定失败或建议 optional 时静默直接提交
+        if (!settings.research_enabled) {
+            try {
+                var adv = await fetchJson('/api/story/research/advice', {
+                    method: 'POST',
+                    headers: JSONH,
+                    body: JSON.stringify({ world_desc: settings.world_desc, genre: settings.genre })
+                });
+                if (adv && adv.advice === 'strong') {
+                    var go = window.confirm(
+                        'AI 检测到陌生/专有世界观，强烈建议先检索资料再生成：\n' +
+                        (adv.reason || '仅凭模型知识可能写错设定') + '\n\n' +
+                        '「确定」= 不管了，直接生成；「取消」= 返回去开启资料检索'
+                    );
+                    if (!go) { resetStartBtn(); return; }
+                }
+            } catch (e) { /* 建议判定失败不打断 */ }
+        }
         $('startBtn').disabled = true;
         $('startBtn').textContent = '提交中…';
         try {
@@ -1224,21 +1302,28 @@
         npcs.forEach(function (npc) {
             var item = document.createElement('span');
             item.className = 'chip-wrap';
+            var dead = !!npc.dead;
             var b = document.createElement('button');
             b.type = 'button';
-            b.className = 'chip' + (npc.id === currentNpcId ? ' active' : '') + (npc.available ? '' : ' disabled');
-            b.textContent = npc.name || npc.id;
-            b.title = npc.available
-                ? ('在' + (npc.location || '此地') + '，点击设为点名对象')
-                : ('在' + (npc.location || '别处') + '，不同地点无法对话');
+            b.className = 'chip' + (npc.id === currentNpcId ? ' active' : '') +
+                (dead ? ' dead' : (npc.available ? '' : ' disabled'));
+            b.textContent = (dead ? '☠ ' : '') + (npc.name || npc.id);
+            b.title = dead
+                ? '已死亡，退出剧情'
+                : (npc.available
+                    ? ('在' + (npc.location || '此地') + '，点击设为点名对象')
+                    : ('在' + (npc.location || '别处') + '，不同地点无法对话'));
             b.addEventListener('click', function () { switchNpc(npc.id); });
             item.appendChild(b);
             var pv = document.createElement('button');
             pv.type = 'button';
-            pv.className = 'priv-btn' + (privId === npc.id ? ' on' : '') + (npc.available ? '' : ' disabled');
+            pv.className = 'priv-btn' + (privId === npc.id ? ' on' : '') +
+                (dead || !npc.available ? ' disabled' : '');
             pv.textContent = '私';
-            pv.title = (privId === npc.id) ? '退出私聊' : ('与 ' + (npc.name || npc.id) + ' 私聊（需同地）');
+            pv.title = dead ? '该角色已死亡'
+                : (privId === npc.id ? '退出私聊' : ('与 ' + (npc.name || npc.id) + ' 私聊（需同地）'));
             pv.addEventListener('click', function () {
+                if (dead) return;
                 if (privId === npc.id) {
                     exitPrivate();
                 } else {
@@ -1250,7 +1335,7 @@
         });
     }
 
-    // 任务与路线面板
+    // 任务面板（8.25：游览路线不再展示——玩家靠任务自由探索，路线只作为 AI 软引导素材）
     function renderQuests() {
         var body = $('questBody');
         body.innerHTML = '';
@@ -1276,16 +1361,16 @@
                 var invested = q.invested_minutes || 0;
                 var need = q.time_cost_minutes || 0;
                 var pct = need ? Math.min(100, Math.round(invested / need * 100)) : 0;
-                var tip = isTime
-                    ? '投入足够时间后，点「汇报完成」向发布任务的 NPC 当面汇报'
-                    : '投入时间推进这件事；任务完成仍以对话中达成为准';
+                var tip = q.has_time_events
+                    ? '每次投入 15 分钟，途中可能遇到事件；时间随投入流逝，完成时不再扣时'
+                    : (isTime
+                        ? '投入足够时间后，点「汇报完成」向发布任务的 NPC 当面汇报'
+                        : '投入时间推进这件事；任务完成仍以对话中达成为准');
                 html += '<div class="q-invest">' +
                     '<div class="q-progress"><div class="q-progress-fill" style="width:' + pct + '%"></div></div>' +
                     '<div class="q-invest-num">已投入 ' + invested + ' / ' + need + ' 分钟</div>' +
                     '<div class="q-invest-btns">' +
                         '<button type="button" class="btn-invest" data-min="15">+15 分钟</button>' +
-                        '<button type="button" class="btn-invest" data-min="30">+30 分钟</button>' +
-                        '<button type="button" class="btn-invest" data-min="60">+60 分钟</button>' +
                     '</div>' +
                     '<div class="q-invest-tip">' + tip + '</div>' +
                 '</div>';
@@ -1299,12 +1384,13 @@
                     });
                 });
             }
-            // 可完成任务：显示「完成」按钮（扣时 = 预留 - 已投入，扣 0 时只显示「完成」，8.20）
+            // 可完成任务：显示「完成」按钮（旧副本扣时 = 预留 - 已投入；9.1 带 time_events 的副本
+            // 时间已随每段 15 分钟流逝，完成不再扣时，只显示「完成」）
             if (q.state === 'completable') {
                 var btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'btn-complete';
-                var remain = Math.max(0, (q.time_cost_minutes || 0) - (q.invested_minutes || 0));
+                var remain = q.has_time_events ? 0 : Math.max(0, (q.time_cost_minutes || 0) - (q.invested_minutes || 0));
                 btn.textContent = remain > 0 ? '完成（推进 ' + remain + ' 分钟）' : '完成';
                 btn.addEventListener('click', function () { completeQuest(q.id); });
                 item.appendChild(btn);
@@ -1320,23 +1406,9 @@
             }
             body.appendChild(item);
         });
-        var routes = (story && story.routes) || [];
-        if (routes.length) {
-            var head = document.createElement('div');
-            head.className = 'route-head';
-            head.textContent = '游览路线';
-            body.appendChild(head);
-            routes.forEach(function (r) {
-                var item = document.createElement('div');
-                item.className = 'route-item';
-                item.innerHTML =
-                    '<span class="r-name">' + escapeHtml(r.name || r.id) + '</span>' +
-                    '<span class="r-brief">' + escapeHtml(r.brief || '') + '</span>' +
-                    '<div class="r-steps">' + escapeHtml((r.steps || []).join(' → ')) + '</div>';
-                body.appendChild(item);
-            });
-        }
-        if (!quests.length && !routes.length) {
+        // 8.25：游览路线不再在玩家面板展示（路线是 AI 侧软引导素材，
+        // 玩家应通过一个个任务自由探索剧情，而不是看管报式路标）
+        if (!quests.length) {
             body.innerHTML = '<div class="q-empty">还没有发现任务。与 NPC 交谈、探索地点，可能会遇到任务。</div>';
         }
         var badge = $('questBadge');
@@ -1387,11 +1459,60 @@
         $('personaOverlay').classList.remove('hidden');
     }
 
-    // 渲染冒险手册（身份卡 / 已完成任务 / NPC 交代的重要信息）
+    // 渲染冒险手册（身份卡 / 生存状态 / 背包 / 已完成任务 / NPC 交代的重要信息）
     function renderHandbook() {
         var html = '';
         html += '<div class="hb-section"><h3>身份卡</h3><div class="hb-persona">' +
             personaHtml(story && story.player_persona) + '</div></div>';
+        // 8.26b 生存状态条（仅生存型副本显示；hp/hunger 只由程序变更）
+        var rules = (story && story.rules) || {};
+        if (rules.survival) {
+            var pv = (story && story.player) || {};
+            var hp = pv.hp == null ? 100 : pv.hp, mx = pv.max_hp || 100;
+            var hg = pv.hunger == null ? 100 : pv.hunger;
+            html += '<div class="hb-section"><h3>生存状态</h3>' +
+                '<div class="surv-row"><span>❤️ HP</span><div class="surv-bar">' +
+                '<div class="surv-fill hp" style="width:' + Math.max(0, Math.min(100, hp / mx * 100)) + '%"></div></div>' +
+                '<span>' + hp + '/' + mx + '</span></div>' +
+                '<div class="surv-row"><span>🍗 饱食</span><div class="surv-bar">' +
+                '<div class="surv-fill hg" style="width:' + Math.max(0, Math.min(100, hg)) + '%"></div></div>' +
+                '<span>' + hg + '/100</span></div></div>';
+        }
+        // 8.26 背包（MC 风格：暗格=已占+数量，浅格=空；玩家只读）
+        // 9.2 双手槽：拿在手上的东西 NPC 当面看得见（出示）；点击背包物品拿起、点击手槽放回
+        var inv = (story && story.inventory) || [];
+        var slots = (story && story.inventory_slots) || 60;
+        var occ = inv.length;
+        var show = Math.min(slots, Math.max(24, Math.ceil(occ / 8) * 8 + 8));
+        var hands = (story && story.hands) || {};
+        var bagHtml = '<div class="hand-row">' +
+            '<span class="hand-label">✋</span>' + handSlotHtml(hands.main, 'main') +
+            '<span class="hand-label">🤲</span>' + handSlotHtml(hands.off, 'off') +
+            '<span class="hand-tip">手上的东西 NPC 当面看得见（出示）；点手上的物品放回</span></div>';
+        if (pendingHand) {
+            bagHtml += '<div class="hand-pick">把「' + escapeHtml(pendingHand.name || pendingHand.item) + '」放到：' +
+                '<button type="button" class="bag-sync" data-handact="main">✋ 主手</button>' +
+                '<button type="button" class="bag-sync" data-handact="off">🤲 副手</button>' +
+                '<button type="button" class="bag-sync" data-handact="cancel">取消</button></div>';
+        }
+        bagHtml += '<div class="bag-grid">';
+        for (var i = 0; i < show; i++) {
+            if (i < occ) {
+                var it = inv[i];
+                bagHtml += '<div class="bag-cell filled' + (it.key ? ' key' : '') + '" data-idx="' + i + '" title="' +
+                    escapeHtml(it.name + (it.desc ? '：' + it.desc : '')) + '">' +
+                    '<span class="bag-name">' + escapeHtml(String(it.name).slice(0, 2)) + '</span>' +
+                    (it.count > 1 ? '<span class="bag-count">' + it.count + '</span>' : '') +
+                    '</div>';
+            } else {
+                bagHtml += '<div class="bag-cell"></div>';
+            }
+        }
+        bagHtml += '</div>';
+        bagHtml += '<div class="bag-meta"><span>' + occ + '/' + slots + ' 格 · 堆叠无上限</span>' +
+            '<button type="button" class="bag-sync" id="bagSyncBtn">📡 背包同步：' +
+            (story.inventory_sync ? '开' : '关（NPC 只能看旧数据）') + '</button></div>';
+        html += '<div class="hb-section"><h3>背包</h3>' + bagHtml + '</div>';
         var done = ((story && story.quests) || []).filter(function (q) { return q.state === 'done'; });
         html += '<div class="hb-section"><h3>已完成任务（' + done.length + '）</h3>';
         if (done.length) {
@@ -1417,6 +1538,65 @@
         }
         html += '</div>';
         $('handbookBody').innerHTML = html;
+    }
+
+    // 8.26c 玩家背包同步开关（信息扩散）：关=冻结快照，NPC 只能看旧数据
+    async function toggleBagSync() {
+        if (!story) return;
+        try {
+            var data = await fetchJson('/api/story/inventory/sync', {
+                method: 'POST',
+                headers: JSONH,
+                body: JSON.stringify({ identity: story.identity, on: !story.inventory_sync })
+            });
+            story.inventory_sync = data.on;
+            renderHandbook();
+        } catch (e) { /* 切换失败静默，下次打开手册重试 */ }
+    }
+
+    // ── 9.2 双手槽 + 交流动作 ──────────────────────────
+
+    var pendingHand = null; // 手册里点了哪个背包物品（待拿起），{item, name}
+
+    // 双手槽单元格 HTML（filled=拿着，点击放回；empty=空手）
+    function handSlotHtml(it, slot) {
+        if (it) {
+            return '<div class="hand-slot filled' + (it.key ? ' key' : '') +
+                '" data-handact="unhold" data-slot="' + slot + '" title="' +
+                escapeHtml(it.name + (it.desc ? '：' + it.desc : '') + '（点击放回背包）') + '">' +
+                '<span class="bag-name">' + escapeHtml(String(it.name).slice(0, 2)) + '</span></div>';
+        }
+        return '<div class="hand-slot empty" title="空手（点击背包里的物品拿起）">' +
+            '<span class="hand-empty">空</span></div>';
+    }
+
+    // 拿起/放回（程序裁决：同槽占用拒绝、物品必须真在包里；数量归零自动清槽由导演负责）
+    async function setHand(slot, item) {
+        if (!story) return;
+        try {
+            var data = await fetchJson('/api/story/hands', {
+                method: 'POST',
+                headers: JSONH,
+                body: JSON.stringify({ identity: story.identity, slot: slot, item: item || null })
+            });
+            if (data.hands) story.hands = data.hands;
+            if (!data.ok && data.msg) addMsg('narration', '（' + data.msg + '）');
+        } catch (e) { /* 失败静默，下次打开手册重试 */ }
+        pendingHand = null;
+        renderHandbook();
+    }
+
+    // 交流动作：点击把舞台指令填进输入框（可改可发——扮演感留在玩家手里）
+    function fillAction(act) {
+        var input = $('chatInput');
+        if (!input || !story || story.ended || sending) return;
+        var npc = null;
+        ((story && story.npcs) || []).forEach(function (n) { if (n.id === currentNpcId) npc = n; });
+        var name = npc ? (npc.name || '') : '';
+        var dir = name ? '（对' + name + '：' + act + '）' : '（' + act + '）';
+        var old = (input.value || '').trim();
+        input.value = dir + old.replace(/^（[^）]*）\s*/, '');
+        input.focus();
     }
 
     // 进入游玩视图（新建开局与刷新续玩共用）
@@ -1464,6 +1644,10 @@
     function switchNpc(npcId) {
         if (npcId === currentNpcId) return;
         var npc = getNpc(npcId);
+        if (npc && npc.dead) {
+            addMsg('narration', (npc.name || npcId) + ' 已经死了，不会再回应。');
+            return;
+        }
         if (npc && npc.available === false) {
             addMsg('narration', (npc.name || npcId) + ' 在' + (npc.location || '别处') + '，不同地点听不到你说话。');
             return;
@@ -1558,6 +1742,11 @@
 
     // ── 私聊（8.13）：建立/解除（后端同地点硬校验）──
     async function togglePrivate(npcId) {
+        var npc = getNpc(npcId);
+        if (npc && npc.dead) {
+            addMsg('narration', (npc.name || npcId) + ' 已经死了，无法私聊。');
+            return;
+        }
         try {
             var data = await fetchJson('/api/story/private', {
                 method: 'POST',
@@ -1851,6 +2040,20 @@
         });
         // 更换背景图（暂停菜单入口 → 选图 → 压缩 → 上传 → 即时生效）
         $('pauseBg').addEventListener('click', function () { $('bgFile').click(); });
+        // 8.27b 重新开始此副本（并行副本模式，类似我的世界重新生成世界）：
+        // 原副本原封保留，复制剧本开一个全新并行存档并直接进入
+        $('pauseRestart').addEventListener('click', async function () {
+            if (!story || !story.identity) return;
+            if (!confirm('要为这个副本开一个全新的并行存档吗？\n\n新副本会回到刚生成时的初始状态（NPC 不记得任何事），原副本及其全部进度原封不动保留在存档列表里。')) return;
+            try {
+                const resp = await fetchJson('/api/story/restart', {
+                    method: 'POST', headers: JSONH, body: JSON.stringify({ identity: story.identity })
+                });
+                $('pauseOverlay').classList.add('hidden');
+                await enterSave(resp.identity);
+                alert('并行副本已创建，已进入新存档，一切从头来过。');
+            } catch (e) { alert('重新开始失败：' + e.message); }
+        });
         $('bgFile').addEventListener('change', async function () {
             var file = this.files && this.files[0];
             this.value = '';
@@ -1883,6 +2086,33 @@
         $('handbookBtn').addEventListener('click', function () {
             renderHandbook();
             $('handbookOverlay').classList.remove('hidden');
+        });
+        // 8.26c 背包同步开关按钮（手册内容每次重渲染，用事件委托绑定）
+        $('handbookBody').addEventListener('click', function (ev) {
+            if (ev.target && ev.target.id === 'bagSyncBtn') { toggleBagSync(); return; }
+            // 9.2 双手槽：点手槽放回 / 待拿起条选主手副手 / 点背包已占格进入待拿起
+            var t = ev.target;
+            var act = t.closest ? t.closest('[data-handact]') : null;
+            if (act) {
+                var kind = act.getAttribute('data-handact');
+                if (kind === 'unhold') { setHand(act.getAttribute('data-slot'), ''); return; }
+                if (kind === 'main' || kind === 'off') {
+                    if (pendingHand) setHand(kind, pendingHand.item);
+                    return;
+                }
+                pendingHand = null;
+                renderHandbook();
+                return;
+            }
+            var cell = t.closest ? t.closest('.bag-cell.filled') : null;
+            if (cell) {
+                var it = ((story && story.inventory) || [])[parseInt(cell.getAttribute('data-idx'), 10)];
+                if (it) { pendingHand = it; renderHandbook(); }
+            }
+        });
+        // 9.2 交流动作 chips（静态元素，一次绑定）：点击把舞台指令填进输入框
+        document.querySelectorAll('.act-chip').forEach(function (b) {
+            b.addEventListener('click', function () { fillAction(b.getAttribute('data-act')); });
         });
         $('handbookClose').addEventListener('click', function () {
             $('handbookOverlay').classList.add('hidden');
@@ -1921,7 +2151,6 @@
     document.addEventListener('DOMContentLoaded', init);
 })();
 
-/* ↑同步自 story.js：2026-10-03 8.24i 以 story.js 当前内容全量重同步（历史回放功能） */
-</script>
+    </script>
 </body>
 </html>

@@ -48,6 +48,7 @@ _QUEST_STATE_CN = {
     "completable": "可完成",
     "done": "已完成",
     "failed": "已失败",
+    "locked": "已错过",  # 8.27 分支路由后未选中的分支（公开视图隐藏）
 }
 
 # 任务状态只进不退的顺序表
@@ -229,6 +230,42 @@ class Director:
             # 8.21b 关系/心情慢变量：{nid: {affinity, trust, mood}}
             self.state["npc_attitude"] = {}
             changed = True
+        if "item_registry" not in self.state:
+            # 8.26a 物品注册表：剧本 items 表（剧情物品，锁死）为初始；运行时自由物品动态追加
+            _reg = {}
+            for _it in self.story.get("items", []) or []:
+                _iid = (str(_it.get("id") or "") if isinstance(_it, dict) else "").strip()
+                if _iid:
+                    _reg[_iid] = {
+                        "name": (str(_it.get("name") or "").strip() or _iid),
+                        "type": (str(_it.get("type") or "").strip() or "杂物"),
+                        "desc": str(_it.get("desc") or "").strip(),
+                        "key": bool(_it.get("key")),
+                    }
+            self.state["item_registry"] = _reg
+            changed = True
+        if "inventory" not in self.state:
+            # 8.26a 背包：{owner_id: {item_id: count}}——玩家与每个 NPC 各一包，程序唯一真身
+            self.state["inventory"] = {}
+            changed = True
+        if "inventory_sync" not in self.state:
+            # 8.26c 背包同步开关：{owner_id: bool}，缺省视为开（True）；玩家的只许玩家自己点
+            self.state["inventory_sync"] = {}
+            changed = True
+        if "inventory_snapshot" not in self.state:
+            # 8.26c 关闭同步瞬间的冻结快照：{owner_id: {item_id: count}}（别人只能看到这个旧数据）
+            self.state["inventory_snapshot"] = {}
+            changed = True
+        if "hands" not in self.state:
+            # 9.2 双手槽：{owner: {"main": item_id|None, "off": item_id|None}}——
+            # 拿在手上的东西当面可见（不受背包同步开关影响），玩家自己操作拿起/放回
+            self.state["hands"] = {}
+            changed = True
+        if "stance" not in self.state:
+            # 9.2 心理防线仪表：{npc_id: int(-3~3)}——A4 提议、导演钳制落盘；
+            # 跨过解锁阈值（2）时程序直写该 NPC 持有的秘密（不依赖 AI 打标）
+            self.state["stance"] = {}
+            changed = True
 
         # ── 8.24c flag 注册制：任务条件与里程碑触发器引用的 flag 键，缺失即预置 ──
         # （RPG Maker 式「先注册后使用」：done_flags 里的键必须存在于 flags 字典，
@@ -250,6 +287,26 @@ class Director:
         if _missing:
             changed = True
             logger.info(f"[flag注册制] 补预置 {len(_missing)} 键: {_missing}")
+
+        # ── 8.26c NPC 背包同步开关键：inventory_sync_<nid>（AI 可提议，白名单预置）──
+        # 玩家的开关（inventory_sync_player）不预置——只许玩家在前端自己点
+        _sync_added = []
+        for _n in self.story.get("npcs", []):
+            _sk = f"inventory_sync_{_n.get('id')}"
+            if _n.get("id") and _sk not in flags:
+                flags[_sk] = True
+                _sync_added.append(_sk)
+        if _sync_added:
+            changed = True
+
+        # ── 8.27 分支选择键：choice_<qid>（branch 型任务，空串=未选）──
+        # 预置供 accept_flags 的 choice_qX==分支id 条件引用（key 不存在 → 条件永远为假）
+        for _q in self.story.get("quests", []):
+            if _q.get("type") == "branch" and _q.get("id"):
+                _ck = f"choice_{_q.get('id')}"
+                if _ck not in flags:
+                    flags[_ck] = ""
+                    changed = True
 
         if changed:
             logger.info(f"副本状态已迁移补齐新字段: {self.identity}")
@@ -295,10 +352,18 @@ class Director:
         return self.state.get("player", {}).get("location", "")
 
     def presence_ids(self) -> list:
-        """与玩家同处的 NPC id 列表（剧本顺序；8.12 可对话性 = 同地点）。"""
+        """与玩家同处的 NPC id 列表（剧本顺序；8.12 可对话性 = 同地点）。
+
+        8.26d：已死亡的 NPC 不算在场（死亡=退出剧情，任意地点都不再出现）。
+        """
         ploc = self.player_location()
         return [npc.get("id") for npc in self.story.get("npcs", [])
-                if self.npc_location(npc.get("id")) == ploc]
+                if not self.is_dead(npc.get("id"))
+                and self.npc_location(npc.get("id")) == ploc]
+
+    def is_dead(self, nid: str) -> bool:
+        """8.26d 该实体是否已死亡（死亡 flag 只进不退，落盘在 flags）。"""
+        return bool(self._flags.get(f"dead_{nid}"))
 
     def presence_names(self, exclude_npc: str = None) -> list:
         """与玩家同处的 NPC 名单（注入用；exclude_npc 从名单里剔除该 NPC 自己）。"""
@@ -432,6 +497,17 @@ class Director:
         player_lines.append(
             f"- 现在与玩家同处的 NPC：{'、'.join(other_names) if other_names else '只有你一个'}"
         )
+        # 8.26d 死亡角色（剧情事实，可提及但他们不会再出场）
+        dead_names = [
+            self.get_npc(n.get("id", "")).get("name", n.get("id", ""))
+            for n in self.story.get("npcs", [])
+            if n.get("id") and self.is_dead(n.get("id"))
+        ]
+        if dead_names:
+            player_lines.append(
+                f"- 已死亡的角色：{'、'.join(dead_names)}（剧情事实，可回忆可提及，"
+                f"但绝不能再出场说话）"
+            )
         # 8.12：地点白名单（[STATE: location=xx] 只认这些确切名）
         other_locs = [loc for loc in self.locations_whitelist() if loc != self.player_location()]
         player_lines.append(f"- 可前往的地点：{'、'.join(other_locs) if other_locs else '（暂无其他地点）'}")
@@ -465,6 +541,24 @@ class Director:
             f"信任 {att['trust']}、心情 {att['mood']}——让这些自然影响你的语气与举动，"
             f"严禁向玩家报出任何数值"
         )
+        # 9.2 心理防线档位：A3 台词语气与档位匹配（施压/套话/示意的攻防结果由导演结算）
+        stance = self._stance(npc_id)
+        lines.append(
+            f"- 你在这几轮攻势下的心理防线：{_stance_tone(stance)}——"
+            f"让台词语气与档位匹配（越接近防线将破，你越守不住自己的秘密）；"
+            f"严禁向玩家报出任何数值"
+        )
+        # 8.26b 生存模式：hp/饥饿濒危提示（hp 变更只走程序，AI 只演不判）
+        if self.is_survival():
+            _p = self.state.get("player", {})
+            _hp, _hg = int(_p.get("hp", 100)), int(_p.get("hunger", 100))
+            if _hp <= 30:
+                lines.append(
+                    f"- 【生存模式】玩家已重伤濒死（HP {_hp}）：你的言行要体现明显的紧张与关切，"
+                    f"推动止血/休息/求救等自救情节")
+            elif _hg <= 20:
+                lines.append(
+                    f"- 【生存模式】玩家已严重饥饿（饱食 {_hg}）：你可以自然地提醒进食或寻找食物")
 
         secret_lines = []
         for sid in npc.get("known_secrets", []):
@@ -520,6 +614,11 @@ class Director:
         research_block = self._research_block(npc_id)
         if research_block:
             lines.append(research_block)
+
+        # 8.26 背包同步块：其他实体随身物品（实时或冻结快照）
+        inv_block = self._inventory_block(npc_id)
+        if inv_block:
+            lines.append(inv_block)
 
         npc_block = "\n".join(lines)
 
@@ -781,6 +880,20 @@ class Director:
                         changes.append(notice)
                         notices.append(notice)
                     continue
+                # 8.26d 死亡通道：dead_{nid}=true（导演裁决：名册校验 + 只进不退）
+                if key.lower().startswith("dead_"):
+                    notice = self._kill_npc(key[len("dead_"):].strip())
+                    if notice:
+                        changes.append(notice)
+                        notices.append(notice)
+                    continue
+                # 8.27 分支选择通道：choice_{qid}=分支任务id（first-write-wins 不可逆）
+                if key.lower().startswith("choice_"):
+                    notice = self._apply_choice(key[len("choice_"):].strip(), val)
+                    if notice:
+                        changes.append(notice)
+                        notices.append(notice)
+                    continue
                 # 8.21a 绝对赋值型数值提议（hp=50），先于 flags 白名单
                 if key in _MUTABLE_KEYS:
                     change = self._mutate_player(key, val, absolute=True)
@@ -977,10 +1090,16 @@ class Director:
                 self._flags[key] = "active"
                 changes.append(f"任务 {qid} 激活（accept_flags 满足）")
                 self._push_quest_notice(q, "undiscovered", "active")
-            done_flags = (q.get("done_flags") or "").strip()
-            if self._flags.get(key) == "active" and done_flags and _eval_condition(done_flags, self._flags):
+            # 8.27 分支型任务：程序判定——choice_<qid> 记录了玩家选择即达成完成条件
+            # （抉择任务的「完成」就是「做出选择」，不依赖模型写 done_flags）
+            if (q.get("type") or "push") == "branch":
+                done_satisfied = bool((self._flags.get(f"choice_{qid}") or "").strip())
+            else:
+                done_flags = (q.get("done_flags") or "").strip()
+                done_satisfied = bool(done_flags) and _eval_condition(done_flags, self._flags)
+            if self._flags.get(key) == "active" and done_satisfied:
                 self._flags[key] = "completable"
-                changes.append(f"任务 {qid} 转为可完成（done_flags 满足，等待玩家点击完成）")
+                changes.append(f"任务 {qid} 转为可完成（{'玩家已做出选择' if (q.get('type') or 'push') == 'branch' else 'done_flags 满足'}，等待玩家点击完成）")
                 self._push_quest_notice(q, "active", "completable")
 
         # 2) 里程碑评估（按 order 升序；已触发的跳过）
@@ -993,6 +1112,27 @@ class Director:
                 self._flags[mkey] = True
                 events.append(m.get("narration_brief") or f"里程碑 {mid} 达成")
                 changes.append(f"里程碑 {mid} 触发")
+
+        # 2.5) 生存型结算（8.26b，仅 rules.survival=true 时）：每游戏时刻饱食 -1，
+        # 饿透（≤0）每时刻扣 HP 5；HP≤0 → 玩家死亡终局。
+        # hp/hunger 变更只走程序（AI 不可改）；tick 保护——同一游戏时刻不重复结算，保幂等。
+        if self.is_survival() and not self.state.get("ended"):
+            _clk = self.state.get("clock", {})
+            _tick = f"{_clk.get('day', 1)}|{_clk.get('time', '08:00')}"
+            if self.state.get("survival_last_tick") != _tick:
+                self.state["survival_last_tick"] = _tick
+                _p = self.state.setdefault("player", {})
+                _hg = max(0, int(_p.get("hunger", 100)) - 1)
+                _p["hunger"] = _hg
+                _hp = int(_p.get("hp", 100))
+                if _hg <= 0:
+                    _hp = max(0, _hp - 5)
+                    _p["hp"] = _hp
+                    changes.append(f"饥饿扣血: HP {_hp}")
+                if _hp <= 0:
+                    self.state["ended"] = True
+                    self.state["ending_reached"] = "death"
+                    changes.append("玩家死亡（HP 归零）——生存终局")
 
         # 3) 终局评估（8.11 多终局：先满足先生效；达成后保持 ended，不重复触发）
         if not self.state.get("ended"):
@@ -1056,6 +1196,26 @@ class Director:
             f"态度事件调整: {npc_id} 好感→{att['affinity']} 信任→{att['trust']}"
             f"（{affinity:+d}/{trust:+d}）"
         )
+
+    def _stance(self, npc_id: str) -> int:
+        """9.2 心理防线仪表（缺省 0，钳 -3~3）：负=抗拒、正=松动。"""
+        try:
+            v = int(self.state.setdefault("stance", {}).get(npc_id, 0))
+        except (TypeError, ValueError):
+            v = 0
+        return max(-3, min(3, v))
+
+    def _stance_tone(self, v: int) -> str:
+        """9.2 防线档位的 A3 演出参考文案（不向玩家报数值）。"""
+        if v <= -2:
+            return "极其抗拒（油盐不进，硬来只会更糟）"
+        if v == -1:
+            return "戒备，话里带刺"
+        if v >= 2:
+            return "防线将破（再一推就要说出来了）"
+        if v == 1:
+            return "有点动摇（话开始变多）"
+        return "平常（不冷不热）"
 
     def _mutate_player(self, key: str, raw: str, absolute: bool = False):
         """8.21a 数值原语应用：白名单键 + 单轮 ±30 钳制 + 值域截断。
@@ -1166,6 +1326,94 @@ class Director:
             notice += f"{name}走开了，私聊结束了。"
         return notice
 
+    def _kill_npc(self, nid: str) -> str | None:
+        """8.26d NPC 死亡通道（AI 提议 + 导演裁决）：死亡 = 剧情事实，只进不退。
+
+        白名单硬校验：只有剧本注册的 NPC id 可死（玩家死亡走生存结算，不在此通道）。
+        死亡生效：flags 落盘 dead_<nid>=true、自动退出在场集合（presence_ids 过滤）、
+        若为私聊对象则私聊自动断开。重复死亡 / 非法 id 一律拒绝。
+
+        Returns:
+            固定旁白字符串（死亡播报），无效提议返回 None。
+        """
+        nid = (nid or "").strip()
+        if not nid:
+            return None
+        try:
+            npc = self.get_npc(nid)
+        except ValueError:
+            logger.info(f"丢弃死亡提议（不在剧本名册）: {nid}")
+            return None
+        if self.is_dead(nid):
+            return None
+        self._flags[f"dead_{nid}"] = True
+        name = npc.get("name", nid)
+        notice = f"☠️ {name}死了。（该角色已退出剧情）"
+        logger.info(f"[死亡] {nid}（{name}）死亡生效，dead_{nid}=true")
+        if self.state.get("private_with") == nid:
+            self.state["private_with"] = None
+            notice += "私聊结束了。"
+        return notice
+
+    # ── 8.27 任务树：分支选择通道与分支路由 ──────────────
+
+    def _apply_choice(self, qid: str, branch_id: str) -> str | None:
+        """8.27 分支选择通道（AI 提议 + 导演裁决）：first-write-wins，选择不可逆。
+
+        白名单硬校验：任务必须存在且 type=branch；分支 id 必须在该任务 branch 表内；
+        选择窗口 = 任务进行中/可完成（done 后路由已闭，locked 后无意义）；
+        已有选择时后续提议一律拒绝（first-write-wins）。
+
+        Returns:
+            固定旁白字符串（选择确认），无效提议返回 None。
+        """
+        qid = (qid or "").strip()
+        branch_id = (branch_id or "").strip()
+        q = self.get_npc_quest(qid) if qid else None
+        if not q or (q.get("type") or "push") != "branch":
+            return None
+        branches = q.get("branch") or {}
+        if branch_id not in branches:
+            logger.info(f"丢弃分支选择提议（不在 branch 表）: choice_{qid}={branch_id}")
+            return None
+        key = f"choice_{qid}"
+        if self._flags.get(key):
+            logger.info(f"丢弃分支选择提议（已选定 {self._flags[key]}，不可逆）: choice_{qid}={branch_id}")
+            return None
+        if self._flags.get(f"quest_{qid}_state", "undiscovered") not in ("active", "completable"):
+            return None  # 选择窗口外（未发现/已完成/已错过）
+        self._flags[key] = branch_id
+        logger.info(f"[任务树] choice_{qid}={branch_id} 生效（first-write-wins）")
+        return "你的选择已被命运记住了。"
+
+    def _route_branches(self, q: dict) -> list:
+        """8.27 分支路由：branch 型任务 done 瞬间调用（complete_quest 内）。
+
+        读 choice_<qid>（A4 在任务进行中提议）：选中的分支照常走 accept 条件激活；
+        其余分支置 state=locked——accept 永不判真 + 公开视图隐藏（该分支玩家玩不到）。
+        未记录任何选择时全部分支锁定（确定性保证：绝不双线齐开）。
+
+        Returns:
+            路由描述列表（日志用）。
+        """
+        if (q.get("type") or "push") != "branch":
+            return []
+        qid = q.get("id", "")
+        chosen = (self._flags.get(f"choice_{qid}") or "").strip()
+        out = []
+        for bid in (q.get("branch") or {}):
+            if bid == chosen:
+                continue
+            bkey = f"quest_{bid}_state"
+            if self._flags.get(bkey) not in ("done", "failed", "locked"):
+                self._flags[bkey] = "locked"
+                out.append(f"分支 {bid} → locked")
+        if not chosen:
+            logger.warning(f"[任务树] 分支任务 {qid} 完成时未记录任何选择，全部分支已锁定")
+        elif out:
+            logger.info(f"[任务树] 分支路由 {qid}: 已选 {chosen}；{'; '.join(out)}")
+        return out
+
     def _apply_flag(self, key: str, val: str, allow_secrets: bool = True):
         """把单个 key=值 提议应用到 flags（白名单 + 值域校验 + 只进不退）。
 
@@ -1180,6 +1428,16 @@ class Director:
         """
         if not key or key not in self._flags:
             return None  # 白名单：AI 发明的 key 直接丢弃
+        if key.startswith("inventory_sync_"):
+            # 8.26c NPC 背包同步开关（键在 _migrate_state 预置白名单内）；
+            # 玩家的开关只许玩家自己点，AI 提议一律拒绝
+            owner = key[len("inventory_sync_"):]
+            if owner == "player":
+                return None
+            b = _parse_bool(val)
+            if b is None:
+                return None
+            return self._set_sync(owner, b, by="AI提议")
         if key.startswith("knows_secret_"):
             if not allow_secrets:
                 logger.info(f"丢弃秘密揭示提议（群场剧场禁揭示）: {key}")
@@ -1287,6 +1545,8 @@ class Director:
             npc = self.get_npc(npc_id)
         except ValueError:
             return {"ok": False, "error": f"副本中不存在 NPC: {npc_id}"}
+        if self.is_dead(npc_id):
+            return {"ok": False, "error": f"{npc.get('name', npc_id)} 已死亡，无法私聊"}
         if self.npc_location(npc_id) != self.player_location():
             return {"ok": False, "error": f"{npc.get('name', npc_id)} 不在这里，无法私聊"}
         self.state["private_with"] = npc_id
@@ -1327,6 +1587,46 @@ class Director:
         clock["time"] = f"{cur // 60:02d}:{cur % 60:02d}"
         return dict(clock)
 
+    def _fire_time_events(self, q: dict, invested: int, notices: list) -> None:
+        """9.1 时间事件表触发引擎：任务内累计投入分钟跨过 at_minute 触点的片段演出。
+
+        事件是剧本 JSON 里的官方数据（BUILDER 预埋），非 AI 提议——give_item /
+        set_flags 由程序直写（未注册物品须带 item_note 动态注册，无 note 则跳过
+        并记日志防凭空造物），不走 AI 白名单。每条事件只触发一次。
+        """
+        evs = q.get("time_events")
+        if not isinstance(evs, list) or not evs:
+            return
+        fired = self.state.setdefault("quest_events_fired", {})
+        done = fired.setdefault(q.get("id", ""), [])
+        for ev in evs:
+            if not isinstance(ev, dict):
+                continue
+            try:
+                at = int(ev.get("at_minute") or 0)
+            except (TypeError, ValueError):
+                continue
+            text = str(ev.get("text") or "").strip()
+            if at <= 0 or at in done or invested < at or not text:
+                continue
+            done.append(at)
+            notices.append(f"🔎 {text}")
+            gi = str(ev.get("give_item") or "").strip()
+            if gi:
+                ch = self._apply_gain("player", gi, ev.get("count", 1),
+                                      str(ev.get("item_note") or "").strip())
+                if ch:
+                    notices.append(f"🎒 {ch}")
+                else:
+                    logger.warning(f"[时间事件] {q.get('id')}@{at}分钟 物品「{gi}」入包失败"
+                                   f"（未注册且无 item_note，跳过）")
+            sf = ev.get("set_flags")
+            if isinstance(sf, dict) and sf:
+                for k, v in sf.items():
+                    self._flags[str(k)] = v
+                logger.info(f"[时间事件] {q.get('id')}@{at}分钟 写 flags: {sf}")
+            logger.info(f"[时间事件] {q.get('id')}@{at}分钟 触发: {text[:50]}")
+
     def invest_time(self, quest_id: str, minutes: int) -> dict:
         """玩家调时投入（8.20，兼容旧副本）：进行中任务分批投入时间。
 
@@ -1356,8 +1656,8 @@ class Director:
             minutes = int(minutes)
         except (TypeError, ValueError):
             minutes = 0
-        if minutes not in (15, 30, 60):
-            empty["error"] = "单次投入只能是 15/30/60 分钟"
+        if minutes != 15:
+            empty["error"] = "单次投入只能是 15 分钟（9.1 起以 15 分钟为单位累加）"
             return empty
         invested = self.state.setdefault("quest_invested", {})
         after = invested.get(quest_id, 0) + minutes
@@ -1369,6 +1669,8 @@ class Director:
         if not is_time:
             # 8.23 遗留③增强：flags 型任务投入不参与完成判定，明示防困惑
             notices.append("（该任务以当面沟通汇报确认为准，投入时间只推进时间。）")
+        # 9.1 时间事件表：跨过触发点的片段演出（旁白呈现 + 官方直写物品/flags）
+        self._fire_time_events(q, after, notices)
         ready_key = f"milestone_{quest_id}_time_ready"
         if is_time and need and after >= need and not self._flags.get(ready_key):
             self._flags[ready_key] = True
@@ -1401,11 +1703,21 @@ class Director:
                 return {"ok": False, "error": "任务尚未达成完成条件", "minutes": 0, "clock": None,
                         "quest_name": q.get("name", quest_id)}
             self._flags[key] = "done"
-            # 8.21b 事件钩子：任务完成 → 发布人好感 +8
+            # 8.27 任务树：branch 型任务 done 瞬间做分支路由——
+            # 选中分支照常走 accept 条件激活，未选分支置 locked（accept 永不判真 + 公开视图隐藏）
+            self._route_branches(q)
             self._adjust_attitude(q.get("giver", ""), affinity=8)
+            # 8.26a 程序奖励通道：reward_items 直接入包（不依赖 AI，月桂叶教训根治）
+            rewards = self.grant_rewards("player", q.get("reward_items") or [])
+            if rewards:
+                logger.info(f"任务奖励入包 {quest_id}: {'; '.join(rewards)}")
             need = q.get("time_cost_minutes", 30)
             invested = self.state.get("quest_invested", {}).get(quest_id, 0)
-            minutes = max(0, need - invested)
+            # 9.1：带时间事件表的任务，时间已在投入时分段流逝，完成不再扣时（防双扣）
+            if q.get("time_events"):
+                minutes = 0
+            else:
+                minutes = max(0, need - invested)
             if minutes > 0:
                 clock = self.advance_clock(minutes)
             else:
@@ -1446,16 +1758,21 @@ class Director:
                 "name": n.get("name", ""),
                 "opening": n.get("opening", ""),
                 "location": self.npc_location(n.get("id", "")),
-                "available": self.npc_location(n.get("id", "")) == ploc,
+                # 8.26d：死亡 NPC 永不可对话（available=false 即灰 chip）
+                "dead": self.is_dead(n.get("id", "")),
+                "available": (not self.is_dead(n.get("id", "")))
+                             and self.npc_location(n.get("id", "")) == ploc,
             }
             for n in self.story.get("npcs", [])
         ]
         npc_name_by_id = {n.get("id", ""): n.get("name", "") for n in self.story.get("npcs", [])}
         # 玩家可见的任务：只返回已发现（非 undiscovered）的——玩家自己发现任务，
         # 系统提示接取，未发现的任务对玩家完全隐藏（8.19 测试反馈）
+        # 8.27：locked（分支路由后未选中的分支）同样完全隐藏——任务面板只显示所在分支
         visible_quests = [
             q for q in self.story.get("quests", [])
-            if self._flags.get(f"quest_{q.get('id')}_state", q.get("state", "undiscovered")) != "undiscovered"
+            if self._flags.get(f"quest_{q.get('id')}_state", q.get("state", "undiscovered"))
+            not in ("undiscovered", "locked")
         ]
         quests = [
             {
@@ -1472,6 +1789,7 @@ class Director:
                 "reward": q.get("reward", ""),
                 "complete_condition": q.get("complete_condition", ""),
                 "time_cost_minutes": q.get("time_cost_minutes", 0),
+                "has_time_events": bool(q.get("time_events")),
             }
             for q in visible_quests
         ]
@@ -1502,6 +1820,18 @@ class Director:
             "scene": self.state.get("scene", ""),
             "ended": bool(self.state.get("ended")),
             "ending_text": self.ending_text() if self.state.get("ended") else "",
+            # 8.26：副本类型规则 + 玩家背包视图（MC 格子渲染）+ 同步开关
+            "rules": dict(self.story.get("rules") or {}),
+            "inventory": [
+                {"item": iid, "count": cnt, "name": self.item_def(iid).get("name", iid),
+                 "type": self.item_def(iid).get("type", "杂物"),
+                 "desc": self.item_def(iid).get("desc", ""),
+                 "key": bool(self.item_def(iid).get("key"))}
+                for iid, cnt in (self.state.get("inventory", {}).get("player") or {}).items()
+            ],
+            "inventory_slots": self.MAX_SLOTS,
+            "inventory_sync": self.sync_on("player"),
+            "hands": self.hands_info(),  # 9.2 双手槽
         }
 
     def auto_meet(self, npc_ids) -> None:
@@ -1518,6 +1848,270 @@ class Director:
                 logger.info(f"[兜底] met_npc_{rid}=true（该角色本轮出过台词，程序自动记相识）")
 
     # ── 8.24d A4 分区输出的状态提议通道 ─────────────────
+
+    # ── 8.26 背包系统 ─────────────────────────────────
+
+    MAX_SLOTS = 60  # 每背包格数上限（不同 item id 数；同 id 堆叠无上限）
+
+    def is_survival(self) -> bool:
+        """8.26b 副本类型：生存型才启用血条/饥饿/死亡判定；剧情型零感知。"""
+        rules = self.story.get("rules")
+        return bool(isinstance(rules, dict) and rules.get("survival"))
+
+    def _is_npc(self, nid) -> bool:
+        try:
+            self.get_npc(nid)
+            return True
+        except (ValueError, KeyError):
+            return False
+
+    def _owner_ok(self, owner) -> bool:
+        """实体校验：player 或任一 NPC id。"""
+        return owner == "player" or self._is_npc(owner)
+
+    def item_def(self, item_id: str) -> dict:
+        return self.state.get("item_registry", {}).get(item_id, {})
+
+    def register_item(self, item_id: str, note: str = "") -> bool:
+        """8.26a 动态注册（first-write-wins）：AI 首次提到的自由物品自动上户口。
+        item_id 用中文短名（AI 提议零翻译）；已存在的 id 不覆盖（剧情物品锁死）。"""
+        reg = self.state.setdefault("item_registry", {})
+        iid = (item_id or "").strip()
+        if not iid or iid in reg:
+            return False
+        reg[iid] = {
+            "name": iid,
+            "type": "杂物",
+            "desc": (note or "").strip(),
+            "key": False,
+        }
+        logger.info(f"[物品动态注册] {iid} 已上户口（自由物品）")
+        return True
+
+    def bag(self, owner: str) -> dict:
+        return self.state.setdefault("inventory", {}).setdefault(owner, {})
+
+    def sync_on(self, owner: str) -> bool:
+        """背包同步开关当前值（缺省开）。"""
+        return bool(self.state.get("inventory_sync", {}).get(owner, True))
+
+    def _set_sync(self, owner: str, on: bool, by: str = "程序") -> str | None:
+        """切换背包同步开关：开→关拍冻结快照（别人只能看旧数据）；关→开清快照恢复实时。"""
+        if not self._owner_ok(owner):
+            return None
+        sync = self.state.setdefault("inventory_sync", {})
+        if bool(sync.get(owner, True)) == on:
+            return None
+        sync[owner] = on
+        snap = self.state.setdefault("inventory_snapshot", {})
+        if on:
+            snap.pop(owner, None)
+        else:
+            snap[owner] = dict(self.bag(owner))
+        logger.info(f"[背包同步] {owner} → {'开' if on else '关'}（{by}）")
+        return f"背包同步 {owner} → {'开' if on else '关'}"
+
+    def visible_bag(self, viewer: str, owner: str) -> dict:
+        """viewer 眼中 owner 的背包：对方同步开=实时；关=最后快照（旧数据）。
+        自己看自己永远实时。"""
+        if owner == viewer:
+            return dict(self.bag(owner))
+        if self.sync_on(owner):
+            return dict(self.bag(owner))
+        return dict(self.state.get("inventory_snapshot", {}).get(owner, {}))
+
+    def _bag_brief(self, items: dict) -> str:
+        if not items:
+            return "（空）"
+        return "、".join(f"{self.item_def(i).get('name', i)}×{c}" for i, c in items.items())
+
+    def _inventory_block(self, npc_id: str) -> str:
+        """8.26a/c 注入块：其他实体同步中的背包（实时）或冻结快照（旧数据）。
+        9.2 追加玩家双手行——拿在手上的东西当面可见，不受背包同步开关影响。"""
+        owners = ["player"] + [n.get("id") for n in self.story.get("npcs", []) if n.get("id")]
+        lines = []
+        # 9.2 玩家双手（当面实况）：玩家亮在手上的东西你应该自然注意到并可谈及
+        _h = self._hands("player")
+        def _hand_name(iid):
+            if not iid:
+                return "空着"
+            d = self.item_def(iid)
+            desc = str(d.get("desc") or "").strip()
+            # 9.3 纸条内容（desc）拿在手上才可读：塞包里只露标题，当面亮出来 NPC 才看得见全文
+            more = ""
+            if desc:
+                more = f"（{desc[:60]}…）" if len(desc) > 60 else f"（{desc}）"
+            return f"拿着「{d.get('name', iid)}」{more}"
+        _holding = bool(_h.get("main") or _h.get("off"))
+        lines.append(
+            f"- 玩家双手（当面可见，实况）：主手{_hand_name(_h.get('main'))}、"
+            f"副手{_hand_name(_h.get('off'))}"
+            + ("——玩家特意亮在手里的东西，你应自然注意到并可以回应/问及" if _holding else "")
+        )
+        for owner in owners:
+            if owner == npc_id:
+                continue  # 自己的包自己知道，不注入
+            if self._is_npc(owner) and self.is_dead(owner):
+                continue  # 8.26d 死者退场，随身物品不再作为"同步实况"注入
+            items = self.visible_bag(npc_id, owner)
+            if not items:
+                continue
+            name = "玩家" if owner == "player" else (
+                self.get_npc(owner).get("name", owner) if self._is_npc(owner) else owner)
+            tag = "" if self.sync_on(owner) else "（记忆中的旧数据，非当前实况）"
+            lines.append(f"- {name}的背包{tag}：{self._bag_brief(items)}")
+        if not lines:
+            return ""
+        return ("### 你所知的各人随身物品（来自背包同步）\n" + "\n".join(lines) +
+                "\n- 引用分寸：可自然提及这些物品；标注旧数据的不要当成最新实况说死。")
+
+    def _apply_transfer(self, frm: str, to: str, item_id: str, count, note: str = "") -> str | None:
+        """导演裁决的物品转移：from 扣 to 加（谁把什么给谁/搜出什么）。
+        未注册物品：note 非空 → 动态注册；note 空 → 拒绝（防凭空造物）。
+        from 数量不够 / to 60 格满 → 拒绝（Playworlds 式显式账本操作）。"""
+        if not self._owner_ok(frm) or not self._owner_ok(to) or frm == to:
+            return None
+        iid = (item_id or "").strip()
+        if not iid:
+            return None
+        try:
+            cnt = max(1, int(count or 1))
+        except (TypeError, ValueError):
+            return None
+        if not self.item_def(iid) and not self.register_item(iid, note=note):
+            return None
+        src = self.bag(frm)
+        if src.get(iid, 0) < cnt:
+            return None
+        dst = self.bag(to)
+        if iid not in dst and len(dst) >= self.MAX_SLOTS:
+            return None
+        src[iid] -= cnt
+        if src[iid] <= 0:
+            del src[iid]
+            self._clear_hand_refs(frm, iid)  # 9.2 手上拿的东西被拿走/送光，清手上引用
+        dst[iid] = dst.get(iid, 0) + cnt
+        return f"{frm} → {to}: {iid}×{cnt}"
+
+    def _apply_gain(self, owner: str, item_id: str, count, note: str = "") -> str | None:
+        """获得（无来源：捡到/剧情授予）。自由物品带 note 动态注册；60 格满拒绝。"""
+        if not self._owner_ok(owner):
+            return None
+        iid = (item_id or "").strip()
+        if not iid:
+            return None
+        try:
+            cnt = max(1, int(count or 1))
+        except (TypeError, ValueError):
+            return None
+        if not self.item_def(iid) and not self.register_item(iid, note=note):
+            return None
+        b = self.bag(owner)
+        if iid not in b and len(b) >= self.MAX_SLOTS:
+            return None
+        b[iid] = b.get(iid, 0) + cnt
+        return f"{owner} 获得 {iid}×{cnt}"
+
+    def _add_note(self, content: str, title: str = "", key: bool = False) -> str | None:
+        """9.3 纸条：AI 把关键信息物品化（承诺/约定/线索）。每张纸条是独立物品（不堆叠），
+        desc=内容全文（拿在手上 NPC 才能读到，塞包里只露标题）；注册后自动放进玩家背包。"""
+        content = (content or "").strip()
+        if not content:
+            return None
+        title = (title or "").strip()[:12]
+        seq = int(self.state.get("note_seq", 0) or 0) + 1
+        self.state["note_seq"] = seq
+        iid = f"note_{seq}"
+        name = f"纸条·{title}" if title else f"纸条{seq}"
+        reg = self.state.setdefault("item_registry", {})
+        reg[iid] = {"name": name, "type": "纸条", "desc": content, "key": bool(key)}
+        if not self._apply_gain("player", iid, 1):
+            del reg[iid]  # 背包满等被拒：注册回滚，不留孤儿户口
+            return None
+        self._quest_notices.append(f"🗒️ 一张纸条被塞进了你的背包（{name}）")
+        logger.info(f"[纸条] {iid}（{name}）：{content[:40]}")
+        return iid
+
+    def _apply_take(self, owner: str, item_id: str, count) -> str | None:
+        """消耗（喝药水/交出任务物品）。只减不加；数量不够拒绝。"""
+        if not self._owner_ok(owner):
+            return None
+        iid = (item_id or "").strip()
+        if not iid or not self.item_def(iid):
+            return None
+        try:
+            cnt = max(1, int(count or 1))
+        except (TypeError, ValueError):
+            return None
+        b = self.bag(owner)
+        if b.get(iid, 0) < cnt:
+            return None
+        b[iid] -= cnt
+        if b[iid] <= 0:
+            del b[iid]
+            self._clear_hand_refs(owner, iid)  # 9.2 消耗到 0，清手上引用
+        return f"{owner} 消耗 {iid}×{cnt}"
+
+    def grant_rewards(self, owner: str, item_ids) -> list:
+        """8.26a 程序奖励通道（任务完成等）：直接入包，不依赖 AI（月桂叶教训根治）。"""
+        out = []
+        for iid in item_ids or []:
+            ch = self._apply_gain(owner, str(iid), 1)
+            if ch:
+                out.append(ch)
+        return out
+
+    def set_player_sync(self, on: bool) -> str | None:
+        """8.26c 玩家背包同步开关（只许玩家自己点，AI/导演无权代操作）。"""
+        return self._set_sync("player", on, by="玩家")
+
+    # ── 9.2 双手槽（玩家交流能力：把东西拿在手上 = 当面出示） ──────────
+
+    def _hands(self, owner: str) -> dict:
+        """取某实体的双手槽记录（缺省自动补默认：双手全空）。"""
+        h = self.state.setdefault("hands", {}).setdefault(owner, {})
+        h.setdefault("main", None)
+        h.setdefault("off", None)
+        return h
+
+    def _clear_hand_refs(self, owner: str, iid: str) -> None:
+        """物品数量归零时清掉手上引用（防手上拿着已经不存在的物品）。"""
+        h = self.state.get("hands", {}).get(owner)
+        if not h:
+            return
+        for s in ("main", "off"):
+            if h.get(s) == iid:
+                h[s] = None
+
+    def set_hand(self, owner: str, slot: str, item_id) -> tuple[bool, str]:
+        """玩家操作：把背包里的物品拿在主手/副手（slot: main/off），或放回（item_id 空）。
+        手上的东西永远当面可见（不受背包同步开关影响）；同槽已占用需先放回。"""
+        if not self._owner_ok(owner) or slot not in ("main", "off"):
+            return False, "无效操作"
+        h = self._hands(owner)
+        iid = str(item_id or "").strip()
+        if not iid:
+            if not h.get(slot):
+                return False, "这只手本来就是空的"
+            h[slot] = None
+            return True, "放回了背包"
+        if h.get(slot):
+            return False, "这只手已经拿着东西，先放回再拿"
+        if self.bag(owner).get(iid, 0) < 1:
+            return False, "背包里没有这个物品"
+        h[slot] = iid
+        return True, f"拿起了「{self.item_def(iid).get('name', iid)}」"
+
+    def hands_info(self) -> dict:
+        """玩家双手槽（含物品详情），供 get_public_state 与 /api/story/hands 返回。"""
+        h = self._hands("player")
+        def info(iid):
+            if not iid:
+                return None
+            d = self.item_def(iid)
+            return {"item": iid, "name": d.get("name", iid), "desc": d.get("desc", ""),
+                    "key": bool(d.get("key")), "count": self.bag("player").get(iid, 0)}
+        return {"main": info(h.get("main")), "off": info(h.get("off"))}
 
     def state_brief_for_ai(self) -> str:
         """生成给 A4 状态总分析调用的「可用键清单 + 当前值」上下文。
@@ -1551,6 +2145,13 @@ class Director:
                 f"- knows_secret_{sid}（{revealed}｜持有人={'、'.join(s.get('holders', []))}）"
                 f"内容: {content}"
             )
+        # 9.2 防线仪表当前值（A4 提议 stance 的参考：接近 +2 时别再猛加，跨 2 程序自动解锁）
+        _npc_ids = [n.get("id") for n in self.story.get("npcs", []) if n.get("id")]
+        if _npc_ids:
+            lines.append("- 心理防线 stance（当前值，范围 -3~3）："
+                         + "、".join(
+                             f"{self.get_npc(n).get('name', n)}={self._stance(n)}"
+                             for n in _npc_ids))
         # AI 可写的剧情里程碑键 / 汇报键
         if self._ai_milestone_flags:
             lines.append("- " + "、".join(
@@ -1558,12 +2159,71 @@ class Director:
                 for k in sorted(self._ai_milestone_flags)))
         if self._ai_reported_flags:
             lines.append("- " + "、".join(sorted(self._ai_reported_flags)))
+        # 8.27 任务树：branch 型任务的分支走向描述 + 当前选择状态（A4 判定 choice 的事实基础）
+        _has_branch = False
+        for q in self.story.get("quests", []):
+            if (q.get("type") or "push") != "branch":
+                continue
+            _has_branch = True
+            qid = q.get("id", "")
+            cur = self._flags.get(f"quest_{qid}_state", "undiscovered")
+            if cur in ("done", "locked"):
+                continue
+            br = q.get("branch") or {}
+            if not br:
+                continue
+            chosen = self._flags.get(f"choice_{qid}", "")
+            opts = "；".join(f"{bid}（{desc}）" for bid, desc in br.items())
+            lines.append(
+                f"- 分支任务「{q.get('name', '')}」({qid}) 当前={cur}｜分支走向: {opts}"
+                + (f"｜玩家已选定: {chosen}（不可更改，勿再提议）" if chosen else ""))
         # 位置事实（attitude/npc_location 提议的事实基础）
         lines.append(f"- 玩家位置: {self.player_location()}")
         for n in self.story.get("npcs", []):
+            dead_tag = "（已死亡）" if self.is_dead(n.get("id", "")) else ""
             lines.append(
-                f"- NPC {n.get('id')}（{n.get('name', '')}）位置: {self.npc_location(n.get('id'))}")
+                f"- NPC {n.get('id')}（{n.get('name', '')}）位置: "
+                f"{self.npc_location(n.get('id'))}{dead_tag}")
         lines.append("- 地点白名单: " + "、".join(self.locations_whitelist()))
+        # 8.26d 死亡通道说明（确切 key 给到 A4，防止发明键名）
+        alive_ids = [n.get("id") for n in self.story.get("npcs", [])
+                     if n.get("id") and not self.is_dead(n.get("id"))]
+        if alive_ids:
+            lines.append(
+                "- 死亡提议: 仅当本轮剧情明确某 NPC 已死亡（被杀/重伤不治/明确的死亡描写）时，"
+                "才提议 dead_<编号>=true（如 dead_n1=true）；不可逆，慎用；"
+                "玩家死亡不在此通道，严禁提议")
+        # 8.27 分支选择纪律（选择权在玩家表现，提议权在 A4，裁决权在导演）
+        if _has_branch:
+            lines.append(
+                "- 分支选择提议: 仅当所在分支任务进行中、玩家做出明确选择或表现明显倾向时，"
+                "提议 choice_<任务id>=<分支任务id>（如 choice_q1=q2b，分支任务 id 见上方各任务"
+                "「分支走向」）；整个副本只许提议一次、不可撤销，玩家没有明确倾向就不要提议")
+        # 8.26 背包：注册表 + 各实体真实背包（A4 提议 gain/transfer/take 的事实基础）
+        reg = self.state.get("item_registry", {})
+        if reg:
+            lines.append("物品注册表: " + "、".join(
+                f"{iid}({d.get('name', '')})" for iid, d in reg.items()))
+        owners = ["player"] + [n.get("id") for n in self.story.get("npcs", []) if n.get("id")]
+        for owner in owners:
+            nm = "玩家" if owner == "player" else (
+                self.get_npc(owner).get("name", owner) if self._is_npc(owner) else owner)
+            lines.append(
+                f"- 背包[{owner}]（{nm}｜同步={'开' if self.sync_on(owner) else '关'}）: "
+                + self._bag_brief(self.state.get("inventory", {}).get(owner) or {}))
+        lines.append(
+            "- 背包提议格式: items=[{op: gain|transfer|take|note, owner/from+to, item, count, note}]；"
+            "新物品（注册表没有的）必须在 note 写一句话描述才能动态注册。"
+            "op=note 写纸条（9.3）：item=短标题、note=内容全文，导演注册独立纸条自动塞进玩家背包——"
+            "仅当本轮出现承诺/约定/关键线索这类将来需要对质或兑现的信息时使用")
+        lines.append(
+            "- 时间事件补充提议格式（9.1）: events=[{text: 旁白文案（必填，具体呈现玩家看见/遭遇了什么，1~2句）, "
+            "give_item: 可选获得物品, item_note: 新物品描述, set_flags: 可选布尔键（只能用键清单里的 key）}]；"
+            "仅当本轮玩家确实施行了任务投入、且剧本事件表之外发生了值得呈现的发现/遭遇时才提议，无则给空数组")
+        lines.append(
+            "- 防线提议格式（9.2）: stance={npc_id: 变化整数（-3~+3）}；仅当玩家对某 NPC 有明确交流攻防"
+            "（施压/套话/示好/把手上证据亮给对方看）且效果明显时提议，无则给空对象；效果纪律见系统提示词，"
+            "跨过 +2 时程序自动解锁其秘密，你不必代打 knows_secret")
         return "\n".join(lines)
 
     def allowed_flag_keys(self) -> dict:
@@ -1579,11 +2239,26 @@ class Director:
         bool_keys = set()
         bool_keys |= {f"met_npc_{n.get('id')}" for n in self.story.get("npcs", []) if n.get("id")}
         bool_keys |= {f"knows_secret_{s.get('id')}" for s in self.story.get("secrets", []) if s.get("id")}
+        bool_keys |= {f"inventory_sync_{n.get('id')}" for n in self.story.get("npcs", []) if n.get("id")}
+        # 8.26d 死亡通道：键枚举进 A4 工具协议投影；裁决走 _kill_npc 专用通道
+        bool_keys |= {f"dead_{n.get('id')}" for n in self.story.get("npcs", []) if n.get("id")}
         bool_keys |= set(self._ai_milestone_flags)
         bool_keys |= set(self._ai_reported_flags)
+        # 9.1 时间事件表 set_flags 键：剧本官方预埋键进协议投影（A4 补充事件可引用）
+        for _q in self.story.get("quests", []):
+            for _ev in (_q.get("time_events") or []):
+                if isinstance(_ev, dict) and isinstance(_ev.get("set_flags"), dict):
+                    bool_keys |= {str(k) for k in _ev["set_flags"] if str(k)}
+        # 8.27 分支选择键：协议枚举进 A4 工具投影；值（分支 id）合法性由 _apply_choice 裁决
+        choice_keys = [
+            {"key": f"choice_{q.get('id')}", "options": sorted((q.get("branch") or {}).keys())}
+            for q in self.story.get("quests", [])
+            if (q.get("type") or "push") == "branch" and q.get("id") and q.get("branch")
+        ]
         return {
             "quest_state_keys": quest_state_keys,
             "bool_keys": sorted(bool_keys),
+            "choice_keys": choice_keys,
             "locations": self.locations_whitelist(),
         }
 
@@ -1601,7 +2276,20 @@ class Director:
         for raw in payload.get("flags") or []:
             if isinstance(raw, str) and "=" in raw:
                 k, _, v = raw.partition("=")
-                ch = self._apply_flag(k.strip(), v.strip(), allow_secrets=allow_secrets)
+                k = k.strip()
+                # 8.26d 死亡通道：专用裁决（名册校验+只进不退），不进通用 flags 白名单
+                if k.lower().startswith("dead_"):
+                    notice = self._kill_npc(k[len("dead_"):].strip())
+                    if notice:
+                        changes.append(f"A4提议 {notice}")
+                    continue
+                # 8.27 分支选择通道：专用裁决（branch 表校验+first-write-wins）
+                if k.lower().startswith("choice_"):
+                    notice = self._apply_choice(k[len("choice_"):].strip(), v.strip())
+                    if notice:
+                        changes.append(f"A4提议 {notice}")
+                    continue
+                ch = self._apply_flag(k, v.strip(), allow_secrets=allow_secrets)
                 if ch:
                     changes.append(f"A4提议 {ch}")
         att = payload.get("attitude")
@@ -1614,12 +2302,93 @@ class Director:
                 if aff and self.get_npc(nid):
                     self._adjust_attitude(nid, affinity=aff)
                     changes.append(f"A4提议 好感 {self.get_npc(nid).get('name', nid)} {aff:+d}")
+        # 9.2 心理防线通道：A4 提议 {npc_id: 变化整数}，导演钳制落盘（单轮 ±3，累计 -3~3）；
+        # 跨过解锁阈值 2 → 程序直写该 NPC 持有的未揭示秘密（不依赖 AI 打标，保底必达）
+        st = payload.get("stance")
+        if isinstance(st, dict):
+            for nid, v in st.items():
+                try:
+                    d = int(str(v).strip().replace("＋", "+").replace("－", "-") or 0)
+                except ValueError:
+                    continue
+                npc = self.get_npc(str(nid))
+                if not npc or not d:
+                    continue
+                d = max(-3, min(3, d))
+                cur = self._stance(str(nid))
+                new = max(-3, min(3, cur + d))
+                if new == cur:
+                    continue
+                self.state.setdefault("stance", {})[str(nid)] = new
+                nm = npc.get("name", nid)
+                changes.append(f"A4提议 防线 {nm} {d:+d}（当前 {new}）")
+                if new >= 2:
+                    for sec in self.story.get("secrets", []):
+                        sid = sec.get("id", "")
+                        if not sid or str(nid) not in (sec.get("holders") or []):
+                            continue
+                        key = f"knows_secret_{sid}"
+                        if not self._flags.get(key):
+                            self._flags[key] = True
+                            self._quest_notices.append(f"💬 {nm}的心理防线撑不住了……")
+                            logger.info(f"[防线解锁] {key} → true（{nm} stance={new}）")
         loc = payload.get("npc_location")
         if isinstance(loc, dict):
             for nid, dest in loc.items():
                 notice = self._move_npc(nid, str(dest or "").strip(), nid)
                 if notice:
                     changes.append(f"A4提议 {notice}")
+        # 8.26a 物品提议通道：gain（获得/捡到）/ transfer（谁把什么给谁）/ take（消耗）
+        # 全部走导演裁决（未注册物品带 note 动态注册；账本校验不过一律拒绝）
+        for it in payload.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            op = str(it.get("op") or "gain").strip().lower()
+            iid = str(it.get("item") or "").strip()
+            if not iid:
+                continue
+            note = str(it.get("note") or "").strip()
+            cnt = it.get("count", 1)
+            if op == "note":
+                # 9.3 纸条：item=标题、note=内容全文，导演注册独立物品并入玩家背包
+                nid2 = self._add_note(content=note, title=iid)
+                if nid2:
+                    changes.append(f"A4提议 NPC写了纸条「{self.item_def(nid2).get('name', nid2)}」")
+                continue
+            if op == "transfer":
+                ch = self._apply_transfer(
+                    str(it.get("from") or "").strip(), str(it.get("to") or "").strip(),
+                    iid, cnt, note)
+            elif op == "take":
+                ch = self._apply_take(str(it.get("owner") or "").strip(), iid, cnt)
+            else:
+                ch = self._apply_gain(str(it.get("owner") or "player").strip(), iid, cnt, note)
+            if ch:
+                changes.append(f"A4提议 {ch}")
+        # 9.1 A4 事件提议（混合模式补充侧）：text 旁白 + 白名单 flags + 物品
+        # 物品被拒（未注册且无 note）→ 整个事件跳过，防凭空造物；flags 编造键丢弃
+        proto_bools = (self.allowed_flag_keys().get("bool_keys") or set())
+        for ev in payload.get("events") or []:
+            if not isinstance(ev, dict):
+                continue
+            text = str(ev.get("text") or "").strip()
+            if not text:
+                continue
+            gi = str(ev.get("give_item") or "").strip()
+            if gi:
+                ch = self._apply_gain("player", gi, ev.get("count", 1),
+                                      str(ev.get("item_note") or "").strip())
+                if not ch:
+                    logger.warning(f"[A4事件提议] 跳过（物品「{gi}」未注册且无 item_note）: {text[:40]}")
+                    continue
+                self._quest_notices.append(f"🎒 {ch}")
+            sf = ev.get("set_flags")
+            if isinstance(sf, dict):
+                for k, v in sf.items():
+                    if str(k) in proto_bools:
+                        self._flags[str(k)] = v
+            self._quest_notices.append(f"🔎 {text}")
+            changes.append(f"A4事件: {text[:30]}")
         if changes:
             logger.info(f"[A4状态提议] 生效 {len(changes)} 项: {'; '.join(changes)}")
         return changes

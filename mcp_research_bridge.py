@@ -37,11 +37,14 @@ import os
 import urllib.error
 import urllib.request
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as _MCPServer
+except ModuleNotFoundError:  # mcp 2.x：FastMCP 更名 MCPServer（tool()/run(transport="stdio") 用法不变）
+    from mcp.server.mcpserver import MCPServer as _MCPServer
 
 BASE_URL = os.environ.get("STORY_BASE_URL", "http://127.0.0.1:5004").rstrip("/")
 
-mcp = FastMCP("story-research")
+mcp = _MCPServer("story-research")
 
 
 def _post(path: str, payload: dict) -> str:
@@ -72,9 +75,12 @@ def submit_story_research(job_id: str, research_json: str) -> str:
         job_id: 检索任务 id，来自检索提示词里的 /api/story/research/<job_id> 路径
         research_json: 符合契约的完整 JSON 文本，格式：
             {"source_model": "工具名/模型名",
+             "entities": [{"name": "规范写法", "type": "人物/地点/组织/物品/术语",
+                           "note": "一句话定义"}],
              "topics": [{"topic": "主题名", "facts": ["已查实的事实"],
                          "uncertain": ["没查实的内容"], "relations": ["A—关系—B"]}],
              "notes": "补充说明，可省略"}
+            entities 为可选专名规范表（8.25b）：先整理再查证，全文专名一律用规范写法；
             每个主题的 facts 与 uncertain 不可同时为空；
             建议总字数控制在 6000 字以内；没查实的内容必须写进 uncertain。
     """

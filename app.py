@@ -26,6 +26,8 @@ API 端点（剧情副本）：
   GET  /api/story/current       — 当前副本公开视图（不含 secrets 原文）
   POST /api/story/npc           — 校验 npc_id 是否存在于当前剧本
   POST /api/story/finish        — 终局归档（置 ended + 清除当前副本指针）
+  POST /api/story/restart       — 8.27b 重新开始此副本：复制剧本开并行新副本
+                                   （原副本原封保留，新副本回到「刚造完成」状态）
   POST /api/story/quest/complete — 玩家点「完成」：completable→done + 扣时推进时钟
   POST /api/story/private       — 建立/解除私聊模式（同地点硬校验；npc_id 空 = 解除）
   POST /api/story/location      — 玩家切换地点（白名单校验；私聊对象不在场自动断开）
@@ -37,13 +39,15 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import uuid
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
 
-from agent.ai_client import token_stats
+from agent.ai_client import token_stats, client
+from agent import prompts as PROMPTS
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -434,6 +438,38 @@ def story_create_status(job_id):
     return jsonify({"job_id": job_id, **pub})
 
 
+@app.route("/api/story/research/advice", methods=["POST"])
+def story_research_advice():
+    """8.25 生成前的检索建议判定：陌生世界观（现实 IP/真实历史/专业领域）强烈建议先检索。
+
+    前端点「生成」且未开检索开关时先调这里；advice=strong 则弹窗建议返回开启检索。
+    LLM 失败静默降级 optional——绝不打断生成流程。
+    """
+    data = request.get_json(silent=True) or {}
+    world = (data.get("world_desc") or "").strip()
+    genre = (data.get("genre") or "").strip()
+    if not world:
+        return jsonify({"advice": "optional", "reason": ""})
+    try:
+        resp = client.chat(
+            system_prompt=PROMPTS.RESEARCH_ADVICE_SYSTEM,
+            user_message=f"【世界观】{world[:600]}\n【故事类型】{genre or '未指定'}",
+            temperature=0.1,
+            max_tokens=120,
+        )
+        m = re.search(r"\{.*\}", resp, re.S)
+        payload = json.loads(m.group(0)) if m else {}
+        advice = payload.get("advice")
+        if advice not in ("strong", "optional"):
+            advice = "optional"
+        reason = str(payload.get("reason", ""))[:60]
+        logger.info(f"检索建议判定: {advice}（{reason}）")
+        return jsonify({"advice": advice, "reason": reason})
+    except Exception as e:
+        logger.warning(f"检索建议判定失败（降级 optional）: {e}")
+        return jsonify({"advice": "optional", "reason": ""})
+
+
 @app.route("/api/story/research/<job_id>", methods=["POST"])
 def story_research_submit(job_id):
     """8.16 接收端（HTTP 端点即 MCP tool over HTTP）：外部 AI 或粘贴框提交检索结果。
@@ -717,6 +753,67 @@ def story_finish():
                     "ending_text": ending_text})
 
 
+@app.route("/api/story/restart", methods=["POST"])
+def story_restart():
+    """8.27b 重新开始此副本（并行副本模式，类比「我的世界」重新生成世界）。
+
+    原副本及其全部进度原封不动；用它已保存的剧本（含刚造完成的初始设定与
+    封面/背景图）复制出一个全新并行副本：
+      - 新 identity = {原id}_r{N}（N 从 2 递增避让）
+      - 剧本 story_id 同步改、title 加「（重开N-1）」便于存档列表区分
+      - 运行时状态用 new_state 从剧本重建（与 build 落盘的初始 state 同源，
+        即「刚造完成」的状态），记忆目录自然为空
+      - 注册新副本身份（照搬 builder._register_identity 条目格式），当前指针
+        指向新副本；前端拿返回的新 identity 直接进入
+    """
+    import copy
+
+    from story.schema import new_state
+
+    data = request.get_json(silent=True) or {}
+    src = (data.get("identity") or "").strip() or story_store.get_current_identity()
+    src_story = story_store.load_story(src) if src else None
+    if not src_story:
+        return jsonify({"error": f"副本不存在: {src or '(未指定)'}"}), 404
+
+    # 新 identity：{原id}_r{N}，N 从 2 递增直到剧本与身份注册表都不冲突
+    n = 2
+    while story_store.load_story(f"{src}_r{n}") is not None or f"{src}_r{n}" in load_identities():
+        n += 1
+    new_id = f"{src}_r{n}"
+
+    # 1) 复制剧本（story_id 同步改；title 加重开标记，存档列表可见区分）
+    new_story = copy.deepcopy(src_story)
+    new_story["story_id"] = new_id
+    new_story["title"] = f"{src_story.get('title') or src}（重开{n - 1}）"
+    story_store.save_story(new_id, new_story)
+
+    # 2) 刚造完成的初始状态：new_state 从剧本重建，记忆由 pipeline 首次进入时创建
+    story_store.save_state(new_id, new_state(new_story))
+
+    # 3) 注册新副本身份（条目格式与 builder._register_identity 一致，persona 继承原副本）
+    identities = load_identities()
+    if new_id in identities:
+        return jsonify({"error": f"身份 '{new_id}' 已存在"}), 409
+    identities[new_id] = {
+        "name": new_id,
+        "persona": identities.get(src, {}).get("persona") or {
+            "name": new_story.get("title") or new_id,
+            "personality": "沉浸式剧情演出",
+            "world_setting": (new_story.get("setting") or {}).get("world_desc", ""),
+        },
+        "created_at": datetime.datetime.now().isoformat(),
+        "kind": "story",
+        "story_id": new_id,
+    }
+    save_identities(identities)
+
+    # 4) 当前指针指向新副本（原副本的流水线缓存不动）
+    story_store.set_current(new_id)
+    logger.info(f"并行副本已创建: {src} → {new_id}（原副本原封保留）")
+    return jsonify({"ok": True, "identity": new_id, "source": src})
+
+
 @app.route("/api/story/quest/complete", methods=["POST"])
 def story_quest_complete():
     """玩家点「完成」：任务 completable → done + 扣 time_cost_minutes 推进时钟。
@@ -815,6 +912,35 @@ def story_reveal():
     notices = d.take_quest_notices()
     return jsonify({"ok": True, "secret_id": sid, "notices": notices,
                     "story_state": d.get_public_state()})
+
+
+@app.route("/api/story/inventory/sync", methods=["POST"])
+def story_inventory_sync():
+    """8.26c 玩家背包同步开关（信息扩散）：开=背包实时对 NPC 可见；关=冻结快照，
+    NPC 只能看到关闭瞬间的旧数据。NPC 的开关走 AI 提议通道，玩家自己的这里点。"""
+    d, err = _load_director_or_none()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    changed = d.set_player_sync(bool(data.get("on")))
+    if changed:
+        d.save()
+    return jsonify({"ok": True, "changed": bool(changed),
+                    "on": d.sync_on("player")})
+
+
+@app.route("/api/story/hands", methods=["POST"])
+def story_hands():
+    """9.2 双手槽：玩家把背包物品拿在主手/副手（当面可见，不受同步开关影响）或放回。
+    请求 {identity, slot: "main"|"off", item: item_id 或 null}；item 空=放回该手。"""
+    d, err = _load_director_or_none()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    ok, msg = d.set_hand("player", str(data.get("slot") or ""), data.get("item"))
+    if ok:
+        d.save()
+    return jsonify({"ok": bool(ok), "msg": msg, "hands": d.hands_info()})
 
 
 @app.route("/api/story/private", methods=["POST"])

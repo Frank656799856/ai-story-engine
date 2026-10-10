@@ -58,7 +58,13 @@ def _build_state_tool(hints: dict = None) -> dict:
     hints 为空时（如管线未传 director）构建无枚举的宽松 schema，行为退化为普通 JSON 约束。
     """
     hints = hints or {}
-    key_enum = sorted(set(hints.get("bool_keys") or []) | set(hints.get("quest_state_keys") or []))
+    # 8.27 分支选择键并入枚举：choice_qX 的值是分支任务 id（合法值由导演裁决，
+    # 枚举层只保证 key 不被编造）
+    key_enum = sorted(
+        set(hints.get("bool_keys") or [])
+        | set(hints.get("quest_state_keys") or [])
+        | {c.get("key") for c in (hints.get("choice_keys") or []) if c.get("key")}
+    )
     key_prop = {"type": "string", "description": "flags 键名，只能从可用键清单中选择，禁止编造"}
     if key_enum:
         key_prop["enum"] = key_enum
@@ -83,7 +89,8 @@ def _build_state_tool(hints: dict = None) -> dict:
                                 "key": key_prop,
                                 "value": {
                                     "type": "string",
-                                    "description": "布尔键用 true/false；quest_*_state 键用 active/failed",
+                                    "description": "布尔键用 true/false；quest_*_state 键用 active/failed；"
+                                                   "choice_* 键用分支任务 id（如 q2b，只能取该任务分支走向里列出的 id）",
                                 },
                             },
                             "required": ["key", "value"],
@@ -93,12 +100,90 @@ def _build_state_tool(hints: dict = None) -> dict:
                         "type": "object",
                         "description": "npc_id → 本轮好感变化整数（如被真诚相待 +2、被戳穿 -3），无变化给空对象",
                     },
+                    "stance": {
+                        "type": "object",
+                        "description": "npc_id → 本轮心理防线变化整数（9.2，-3~+3，负=更抗拒、正=更松动）。"
+                                       "效果纪律：玩家有证据/筹码在手（手上亮着的物品对 NPC 可见）且施压→+2（好感常-1）；"
+                                       "空手硬施压→防线不动（好感-2）；套话在好感为正时有效→+1，否则+0；"
+                                       "示好→好感+2 防线+0~+1；关键证据拿在手上被对方看到并当面质问→+3；"
+                                       "无明确交流攻防给空对象。跨过 +2 程序自动解锁其秘密，不必代打 knows_secret",
+                    },
                     "npc_location": {
                         "type": "object",
                         "description": "npc_id → 本轮实际动身前往的地点（必须在地点白名单内），无变化给空对象",
                     },
+                    "items": {
+                        "type": "array",
+                        "description": "物品变动提议列表（8.26：gain=获得/捡到、transfer=谁把什么给谁、take=消耗；"
+                                       "9.3 note=写纸条把承诺/约定/关键线索物品化），无变化给空数组",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["gain", "transfer", "take", "note"],
+                                    "description": "gain=获得（捡到/剧情授予）、transfer=转移（from 把 item 给 to）、"
+                                                   "take=消耗（owner 用掉/交出）、note=写纸条（9.3：仅当本轮出现"
+                                                   "承诺/约定/关键线索这类将来需要对质或兑现的信息时用）",
+                                },
+                                "item": {
+                                    "type": "string",
+                                    "description": "物品短名（如 月桂叶）；op=note 时是纸条短标题（如 今晚交账册）。"
+                                                   "可用键清单物品注册表里没有的新物品，必须在 note 写一句话描述，否则会被拒绝",
+                                },
+                                "count": {
+                                    "type": "integer",
+                                    "description": "数量，默认 1",
+                                },
+                                "owner": {
+                                    "type": "string",
+                                    "description": "gain/take 的实体 id：player 或 npc id",
+                                },
+                                "from": {
+                                    "type": "string",
+                                    "description": "transfer 的给方实体 id（只能动自己拥有或剧情明确支配的物品）",
+                                },
+                                "to": {
+                                    "type": "string",
+                                    "description": "transfer 的收方实体 id",
+                                },
+                                "note": {
+                                    "type": "string",
+                                    "description": "新物品的一句话描述（动态注册用）；注册表已有的物品留空；"
+                                                   "op=note 时改为纸条内容全文（如「老陶答应今晚把账册交给你」），导演会把它做成独立纸条塞进玩家背包",
+                                },
+                            },
+                            "required": ["op", "item"],
+                        },
+                    },
+                    "events": {
+                        "type": "array",
+                        "description": "9.1 时间事件补充提议：本轮剧情中玩家确实施行了任务投入、且剧本事件表之外发生了值得呈现的发现/遭遇时提议（以旁白呈现给玩家）；无则给空数组",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "description": "旁白文案：具体呈现玩家看见/发现/遭遇了什么，有画面有细节，一句到两句",
+                                },
+                                "give_item": {
+                                    "type": "string",
+                                    "description": "可选：事件中玩家获得的物品短名；注册表没有的新物品必须同时写 item_note，否则整个事件被拒绝",
+                                },
+                                "item_note": {
+                                    "type": "string",
+                                    "description": "give_item 新物品的一句话描述（动态注册用）",
+                                },
+                                "set_flags": {
+                                    "type": "object",
+                                    "description": "可选：事件写入的布尔键（只能用键清单里列出的 key，编造会被丢弃）",
+                                },
+                            },
+                            "required": ["text"],
+                        },
+                    },
                 },
-                "required": ["player_state", "flags", "attitude", "npc_location"],
+                "required": ["player_state", "flags", "attitude", "stance", "npc_location", "items", "events"],
             },
         },
     }
@@ -119,8 +204,14 @@ def _normalize_tool_args(args: dict) -> dict:
     out = {"flags": flags}
     if isinstance(args.get("attitude"), dict):
         out["attitude"] = args["attitude"]
+    if isinstance(args.get("stance"), dict):
+        out["stance"] = args["stance"]
     if isinstance(args.get("npc_location"), dict):
         out["npc_location"] = args["npc_location"]
+    if isinstance(args.get("items"), list):
+        out["items"] = args["items"]
+    if isinstance(args.get("events"), list):
+        out["events"] = args["events"]
     return out
 
 

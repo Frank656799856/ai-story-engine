@@ -322,7 +322,10 @@ class NPCPipeline:
             elif npc_id:
                 try:
                     far_name = d.get_npc(npc_id).get("name", npc_id)
-                    notices.append(f"（{far_name} 不在这里，没有听到你的话）")
+                    if d.is_dead(npc_id):
+                        notices.append(f"（{far_name} 已经死了，不会再回应）")
+                    else:
+                        notices.append(f"（{far_name} 不在这里，没有听到你的话）")
                 except ValueError:
                     pass
 

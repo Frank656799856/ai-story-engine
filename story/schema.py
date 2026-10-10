@@ -21,7 +21,8 @@ import re
 
 # 任务状态枚举（builder 生成与 director 白名单共用）
 # 状态只进不退：undiscovered → active → completable → done / failed
-QUEST_STATES = ["undiscovered", "active", "completable", "done", "failed"]
+# 8.27 新增 locked（分支路由后未选中的分支）——只有程序写，AI 提议一律拒绝
+QUEST_STATES = ["undiscovered", "active", "completable", "done", "failed", "locked"]
 
 # 时钟格式（24 小时制 HH:MM）
 _CLOCK_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -200,47 +201,96 @@ def validate_story(d) -> list:
         # 判定模式（8.20）：flags=事实型（done_flags 判定）/ time=动作型（时间投入 + 口头汇报）
         if q.get("judge_mode", "flags") not in ("flags", "time"):
             errors.append(f"{tag}.judge_mode 必须是 flags/time 之一")
+        # 8.27 任务树（向后兼容：字段缺省 = push 现状行为）
+        qtype = q.get("type", "push")
+        if qtype not in ("push", "branch"):
+            errors.append(f"{tag}.type 必须是 push/branch 之一")
+        if q.get("next") and not isinstance(q.get("next"), str):
+            errors.append(f"{tag}.next 必须是字符串（指向下一环任务 id）")
+        if qtype == "branch":
+            branch = q.get("branch")
+            if not isinstance(branch, dict) or not branch:
+                errors.append(f"{tag}.branch 型任务必须有 branch 分支表（{{任务id: 走向描述}}，至少 2 项）")
+            elif len(branch) < 2:
+                errors.append(f"{tag}.branch 分支表至少要 2 个分支才算分叉")
+            else:
+                for bid, bdesc in branch.items():
+                    if not isinstance(bid, str) or not bid.strip() or not isinstance(bdesc, str) or not bdesc.strip():
+                        errors.append(f"{tag}.branch 分支表必须是 {{任务id: 走向描述}} 且值非空")
+                        break
         qid = q.get("id")
         if isinstance(qid, str) and qid:
             if qid in quest_ids:
                 errors.append(f"任务 id 重复: {qid}")
             quest_ids.add(qid)
-        # 机器可判 flags（8.11）：accept_flags 可空（空 = 开局即激活），done_flags 必填
+        # 机器可判 flags（8.11）：accept_flags 可空（空 = 开局即激活）
+        # done_flags 必填——8.27 起 branch 型任务除外（程序按 choice_键 判定，模型无需写）
         _validate_condition_expr(q.get("accept_flags", ""), f"{tag}.accept_flags", errors, required=False)
-        _validate_condition_expr(q.get("done_flags"), f"{tag}.done_flags", errors, required=True)
+        _validate_condition_expr(q.get("done_flags"), f"{tag}.done_flags", errors,
+                                 required=(qtype != "branch"))
         # 固定耗时（8.12）：AI 考量写入，1~600 分钟
         tcm = q.get("time_cost_minutes")
         if not isinstance(tcm, int) or isinstance(tcm, bool) or not (1 <= tcm <= 600):
             errors.append(f"{tag}.time_cost_minutes 必须是 1~600 的整数（按任务量级考量）")
+        # 9.1 时间事件表（可选）：15 分钟分段演出——投入时触发的中途事件
+        te = q.get("time_events")
+        if te is not None:
+            if not isinstance(te, list):
+                errors.append(f"{tag}.time_events 必须是数组")
+            else:
+                item_names = {it.get("name") for it in d.get("items", [])
+                              if isinstance(it, dict) and it.get("name")}
+                ats = []
+                for j, ev in enumerate(te):
+                    etag = f"{tag}.time_events[{j}]"
+                    if not isinstance(ev, dict):
+                        errors.append(f"{etag} 必须是对象")
+                        continue
+                    at = ev.get("at_minute")
+                    if not isinstance(at, int) or isinstance(at, bool) or at <= 0 or at % 15 != 0:
+                        errors.append(f"{etag}.at_minute 必须是 15 的正整数倍")
+                    else:
+                        ats.append(at)
+                    if not str(ev.get("text") or "").strip():
+                        errors.append(f"{etag}.text 必须是非空旁白文案")
+                    gi = str(ev.get("give_item") or "").strip()
+                    if gi and gi not in item_names and not str(ev.get("item_note") or "").strip():
+                        errors.append(f"{etag}.give_item「{gi}」未注册，必须写 item_note 供动态注册")
+                    sf = ev.get("set_flags")
+                    if sf is not None and not isinstance(sf, dict):
+                        errors.append(f"{etag}.set_flags 必须是对象")
+                if len(ats) != len(set(ats)):
+                    errors.append(f"{tag}.time_events 的 at_minute 不能重复")
 
-    # ── 游览路线（8.11，软引导）──
+    # ── 游览路线（8.11 曾必填；8.27 起任务树替代、routes 退役：有则宽容校验，无则通过）──
     routes = d.get("routes")
     route_ids = set()
-    if not isinstance(routes, list) or not (2 <= len(routes) <= 3):
-        errors.append("routes 必须是 2~3 个对象的数组")
-        routes = []
-    for i, r in enumerate(routes if isinstance(routes, list) else []):
-        tag = f"routes[{i}]"
-        if not isinstance(r, dict):
-            errors.append(f"{tag} 必须是对象")
-            continue
-        rid = r.get("id")
-        if not isinstance(rid, str) or not rid.strip():
-            errors.append(f"{tag}.id 必须是非空字符串")
-        elif rid in route_ids:
-            errors.append(f"路线 id 重复: {rid}")
-        else:
-            route_ids.add(rid)
-        for key in ("name", "brief"):
-            if not isinstance(r.get(key), str) or not r.get(key, "").strip():
-                errors.append(f"{tag}.{key} 必须是非空字符串")
-        steps = r.get("steps")
-        if not isinstance(steps, list) or not steps:
-            errors.append(f"{tag}.steps 必须是非空字符串数组（有序步骤链）")
-        else:
-            for j, s in enumerate(steps):
-                if not isinstance(s, str) or not s.strip():
-                    errors.append(f"{tag}.steps[{j}] 必须是非空字符串")
+    if routes is not None:
+        if not isinstance(routes, list):
+            errors.append("routes 必须是对象数组")
+            routes = []
+        for i, r in enumerate(routes):
+            tag = f"routes[{i}]"
+            if not isinstance(r, dict):
+                errors.append(f"{tag} 必须是对象")
+                continue
+            rid = r.get("id")
+            if not isinstance(rid, str) or not rid.strip():
+                errors.append(f"{tag}.id 必须是非空字符串")
+            elif rid in route_ids:
+                errors.append(f"路线 id 重复: {rid}")
+            else:
+                route_ids.add(rid)
+            for key in ("name", "brief"):
+                if not isinstance(r.get(key), str) or not r.get(key, "").strip():
+                    errors.append(f"{tag}.{key} 必须是非空字符串")
+            steps = r.get("steps")
+            if not isinstance(steps, list) or not steps:
+                errors.append(f"{tag}.steps 必须是非空字符串数组（有序步骤链）")
+            else:
+                for j, s in enumerate(steps):
+                    if not isinstance(s, str) or not s.strip():
+                        errors.append(f"{tag}.steps[{j}] 必须是非空字符串")
 
     # ── 里程碑 ──
     milestones = d.get("milestones")
@@ -326,6 +376,10 @@ def new_state(story: dict) -> dict:
         if q.get("judge_mode", "flags") == "time":
             flags[f"milestone_{q.get('id')}_time_ready"] = False
             flags[f"milestone_{q.get('id')}_reported"] = False
+        # 8.27 分支选择键（branch 型任务）：空串 = 尚未选择；值 = 选中的分支任务 id
+        # （预置进 flags 供 accept_flags 的 choice_qX==分支id 条件引用）
+        if q.get("type") == "branch":
+            flags[f"choice_{q.get('id')}"] = ""
     for m in story.get("milestones", []):
         flags[f"milestone_{m.get('id')}"] = False
 
@@ -372,11 +426,20 @@ def new_state(story: dict) -> dict:
 def validate_research(data) -> list:
     """校验外部 AI 提交的检索资料 JSON（8.16 契约），返回错误清单（空列表 = 通过）。
 
-    契约：{source_model, topics: [{topic, facts[], uncertain[], relations[]}], notes}
+    契约：{source_model, entities?: [{name, type, note}],
+           topics: [{topic, facts[], uncertain[], relations[]}], notes}
+    entities 为 8.25b 新增可选区块（专名规范表），旧格式无 entities 仍通过。
     校验不通过时由调用方生成「补查提示词」给用户第二趟。
     """
     if not isinstance(data, dict):
         return ["提交内容必须是 JSON 对象（顶层 {}）"]
+    entities = data.get("entities")
+    if entities is not None:
+        if not isinstance(entities, list):
+            return ["entities 必须是数组（每项 {name, type, note}，name 为规范写法）"]
+        for i, e in enumerate(entities, 1):
+            if not isinstance(e, dict) or not str(e.get("name") or "").strip():
+                return [f"entities[{i}] 必须是对象且含 name（规范写法）"]
     topics = data.get("topics")
     if not isinstance(topics, list) or not topics:
         return ["缺少非空的 topics 主题数组（每个主题一个对象）"]
@@ -400,7 +463,8 @@ def format_research(data, max_chars: int = 6000, focus=None):
     """把检索资料 JSON 格式化成可注入文本（8.16 防灌爆）。
 
     Args:
-        data: {source_model, topics: [{topic, facts, uncertain, relations}], notes}
+        data: {source_model, entities?, topics: [{topic, facts, uncertain, relations}], notes}
+               entities 为 8.25b 可选专名规范表 [{name, type, note}]，渲染在最前且不参与截断
         max_chars: 总字数预算（约 6000）
         focus: 可选关键词列表（如 [NPC名, NPC地点, 玩家地点]）。总量超预算时先只保留
                主题名或条目中含关键词的主题；仍超预算再按顺序整主题截断。
@@ -412,6 +476,22 @@ def format_research(data, max_chars: int = 6000, focus=None):
     topics = data.get("topics") if isinstance(data, dict) else None
     if not isinstance(topics, list):
         return "", []
+    # 专名规范表（8.25b）：渲染在最前且不参与主题截断——截掉它防谐音变体就失去意义
+    entity_lines = []
+    if isinstance(data, dict):
+        for e in data.get("entities") or []:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("name") or "").strip()
+            if not name:
+                continue
+            etype = str(e.get("type") or "").strip()
+            note = str(e.get("note") or "").strip()
+            head = f"{name}（{etype}）" if etype else name
+            entity_lines.append(f"- {head}：{note}" if note else f"- {head}")
+    entity_block = ""
+    if entity_lines:
+        entity_block = "【专名规范表（写法以此为准）】\n" + "\n".join(entity_lines)
     blocks = []
     for t in topics:
         if not isinstance(t, dict):
@@ -449,7 +529,7 @@ def format_research(data, max_chars: int = 6000, focus=None):
             parts.append(f"【补充说明】{notes_text}")
         return "\n".join(parts)
 
-    text = _render(blocks, True)
+    text = (entity_block + "\n\n" if entity_block else "") + _render(blocks, True)
     trunc = []
     if len(text) <= max_chars:
         return text, trunc
@@ -464,12 +544,12 @@ def format_research(data, max_chars: int = 6000, focus=None):
         if relevant and len(relevant) < len(blocks):
             trunc.append(f"资料超出 {max_chars} 字预算，仅注入与当前 NPC/地点相关的主题")
             kept = relevant
-            text = _render(kept, True)
+            text = (entity_block + "\n\n" if entity_block else "") + _render(kept, True)
             if len(text) <= max_chars:
                 return text, trunc
     # 仍超预算：按顺序整主题截断
     kept2 = []
-    acc = len(notes_text) + 10
+    acc = len(entity_block) + len(notes_text) + 10
     for topic, blines in kept:
         cost = len(topic) + sum(len(ln) + 1 for ln in blines) + 2
         if acc + cost > max_chars:
@@ -480,4 +560,4 @@ def format_research(data, max_chars: int = 6000, focus=None):
     if not kept2:
         trunc.append(f"资料超出 {max_chars} 字上限，可注入内容为空")
         return "", trunc
-    return _render(kept2, True), trunc
+    return (entity_block + "\n\n" if entity_block else "") + _render(kept2, True), trunc

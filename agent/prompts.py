@@ -351,16 +351,35 @@ A4_STORY_STATE_SYSTEM = (
     "quest_*_state 键的 value 用 active/failed。\n"
     "- attitude：某 NPC 本轮对玩家好感明显变化时填（如被真诚相待 +2、被戳穿 -3），"
     "无变化给空对象。\n"
+    "- stance：某 NPC 本轮心理防线变化整数（9.2，-3~+3，负=更抗拒、正=更松动）。效果纪律："
+    "玩家有筹码在手（玩家手上亮着的物品对 NPC 当面可见）且施压→+2（好感常-1）；空手硬施压→"
+    "防线不动（好感-2）；套话在好感为正时有效→+1，否则+0；示好→好感+2、防线+0~+1；关键证据"
+    "拿在手上被对方看到并当面质问→+3。无明确交流攻防给空对象；防线跨 +2 时程序自动解锁其持有的"
+    "秘密，你不必也不可代打 knows_secret。\n"
     "- npc_location：某 NPC 本轮实际动身离开原地去往别处时填（目的地必须在地点白名单内），"
-    "无变化给空对象。\n\n"
+    "无变化给空对象。\n"
+    "- items：物品变动提议列表，每项含 op/item/count/owner/from/to/note。op 四选一："
+    "gain（某人获得/捡到新物品）、transfer（from 把物品给 to，如赠予/交出/搜出）、"
+    "take（owner 消耗物品，如喝掉药水/交出信物）、note（9.3 写纸条：item=短标题、note=内容全文，"
+    "导演会做成独立纸条塞进玩家背包）。物品有变动就提议（谁捡到、谁送出、"
+    "谁用掉都要记账）；无变化给空数组。注册表里没有的新物品，必须在 note 写一句话描述"
+    "（用于动态注册），否则会被拒绝；数量用 count（默认 1）。\n"
+    "  - 纸条纪律（克制版）：只在本轮出现**承诺/约定/关键线索**这类将来需要对质或兑现的信息时写纸条"
+    "（例：NPC 答应今晚交出账册 → note，标题「今晚交账册」，内容写清谁答应谁、做什么、何时），"
+    "普通聊天内容、记忆能覆盖的软信息不要写纸条；每张纸条独立占一格，不要泛滥。\n\n"
     "判定纪律：\n"
     "1. 只根据本轮对话中确实发生的事提议；此前轮次已确认过的旧事实不要重复提议。\n"
     "2. 任务条件里点名的键：若本轮对话已使条件所述事实成立（包括此前已发生、本轮再次"
     "确认的情况），必须提议。\n"
     "3. 拿不准就不提议——宁可漏提议，不可编造键名或夸大事实。\n"
     "4. player_state 每轮都必须提交（没有变化就原样返回旧状态或「无」）；"
-    "flags/attitude/npc_location 无变化时给空值。\n"
-    "5. 若你的运行环境不支持工具调用，才允许降级：正文先写玩家状态整块，末尾输出 "
+    "flags/attitude/stance/npc_location/items/events 无变化时给空值。\n"
+    "5. inventory_sync_* 键：仅当某 NPC 本轮明显想藏起随身物品、不让旁人知道时提议为 false；"
+    "玩家的同步开关不归你管。\n"
+    "6. dead_<编号> 键（死亡提议）：仅当本轮剧情明确某 NPC 已死亡（被杀、重伤不治、"
+    "明确的死亡描写）时才提议 true；死亡不可逆、严重影响剧情，拿不准绝不提议；"
+    "玩家死亡不在此通道（由生存规则程序判定），严禁提议。\n"
+    "7. 若你的运行环境不支持工具调用，才允许降级：正文先写玩家状态整块，末尾输出 "
     "===STATE=== 分隔行，随后一行 JSON（flags/attitude/npc_location，格式同工具参数）；"
     "正常情况一律走工具。\n\n"
     "{state_brief}\n\n"
@@ -443,11 +462,11 @@ BUILDER_STORY_SYSTEM = (
     '  "npcs": [{"id": "n1", "name": "", "personality": "", "goal": "",'
     ' "known_secrets": ["s1"], "opening": "", "location": "悦来客栈大堂"}],\n'
     '  "secrets": [{"id": "s1", "content": "", "holders": ["n1"], "reveal_hint": ""}],\n'
+    '  "items": [{"id": "月桂叶", "type": "信物", "desc": "灰羽赠送的干枯叶片，能引来某种注视", "key": true}],\n'
     '  "quests": [{"id": "q1", "name": "", "giver": "n1", "complete_condition": "",'
-    ' "judge_mode": "flags", "accept_flags": "met_npc_n2==true", "done_flags": "knows_secret_s1==true",'
-    ' "time_cost_minutes": 60, "reward": "", "state": "undiscovered"}],\n'
-    '  "routes": [{"id": "r1", "name": "", "brief": "",'
-    ' "steps": ["第一步", "第二步", "第三步"]}],\n'
+    ' "type": "push", "next": "q2", "judge_mode": "flags", "accept_flags": "met_npc_n2==true",'
+    ' "done_flags": "knows_secret_s1==true", "time_cost_minutes": 60, "reward": "",'
+    ' "reward_items": ["月桂叶"], "state": "undiscovered"}],\n'
     '  "milestones": [{"id": "m1", "order": 1, "trigger": "quest_q1_state==active",'
     ' "narration_brief": ""}],\n'
     '  "endings": [{"id": "e1", "title": "", "condition": "quest_q1_state==done",'
@@ -459,7 +478,7 @@ BUILDER_STORY_SYSTEM = (
     " skills 能力或随身物，各 1 句话以内）；玩家在附加要求里指定了玩家角色时必须照用其名字与"
     "身份，未指定时由你结合世界观设计一个有代入感的普通人角色（不要救世主，要有卷入纷争的"
     "理由），全剧围绕其展开；\n"
-    "- npc/秘密/任务/路线/里程碑/终局的 id 全剧唯一，格式如 n1、s1、q1、r1、m1、e1；\n"
+    "- npc/秘密/任务/里程碑/终局的 id 全剧唯一，格式如 n1、s1、q1、m1、e1；\n"
     "- 每条秘密的 holders 必须指向存在的 NPC 且至少一人持有；NPC 的 known_secrets 必须"
     "指向存在的秘密 id；每个 quest 的 giver 必须是已定义的 NPC；\n"
     "- locations 是地点白名单（2~8 个简短地点名），所有 NPC 的 location 与玩家的"
@@ -469,23 +488,47 @@ BUILDER_STORY_SYSTEM = (
     "- clock 是游戏内起始时间：day>=1 的整数，time 是 24 小时制 \"HH:MM\"（按题材设定"
     "合理的开局时刻，如夜局用 20:00）；时间只在玩家投入任务时间或完成任务时由程序推进，"
     "每任务耗时写在 time_cost_minutes；\n"
-    "- 任务至少 2 个。accept_flags 是任务被激活的条件（可留空串 = 开局即激活）；"
-    "每个任务必须有 judge_mode（二选一）：\n"
+    "- 任务结构由你自由编排（8.27b）：扁平推进链或有分叉的目录树都合法，按剧情需要选择——\n"
+    "  ①推进型任务（type:\"push\"，主线骨架）：写 next:\"下一环任务id\"，accept_flags 写激活条件"
+    "（引用上一环相关 flags，可留空串 = 开局即激活）；每环都要让剧情往前走一大步，环环咬合，"
+    "严禁「接→做→交」的平行流水账；\n"
+    "  ②分支型任务（type:\"branch\"，可选——只在剧情确实需要分叉时才用）：这是剧情的分叉点，"
+    "branch 写成分支表 {\"分支任务id\":\"走向此分支的剧情描述\"}（2~3 个分支）；它的"
+    "complete_condition 必须写明玩家面临的选择情境（如「是替她隐瞒，还是报官」），"
+    "且不写 done_flags（程序在记录到玩家的选择后自动判定完成）；\n"
+    "  ③分支任务自身必须完整定义（giver/name/complete_condition/accept_flags/judge_mode/"
+    "time_cost_minutes/reward 一样不少），accept_flags 原样写 \"choice_分叉任务id==本任务id\""
+    "（玩家选了这条分支它才会激活）；\n"
+    "  ④未被选择的分支会被程序锁定，玩家永远玩不到——所以各分支的走向必须真的不同"
+    "（不同的人物命运/结局贡献/奖励），每条都值得玩家想选；分支任务之后可以再接推进环收束主线；\n"
+    "每个任务都必须有 judge_mode（二选一）：\n"
     "  ①\"flags\"＝事实型任务（传话/揭秘/见到某人/剧情关键抉择等可在对话中验证的）："
     "done_flags 只能用 knows_secret_sX==true/false、met_npc_nX==true/false、"
     "quest_qX_state==枚举值 或 milestone_自定义词==true/false（可用 && 连接两个条件）"
-    "——程序按 flags 集合自动判定，NPC 的口头承诺不算数；\n"
+    "——程序按 flags 集合自动判定，NPC 的口头承诺不算数（分支型任务除外，见上）；\n"
     "  ②\"time\"＝动作型任务（整理/打扫/搬运/修复/等待结果等无法在对话中验证的）："
     "done_flags 必须原样写 \"milestone_该任务id_time_ready==true && milestone_该任务id_reported==true\""
     "（时间投入达标由程序自动判定；玩家口头汇报干完、NPC 认可后由 AI 提议 reported）；\n"
     "- time_cost_minutes 是完成该任务的固定耗时（1~600 的整数，按任务量级考量："
     "跑腿传话约 30，调查取证约 60~120，重大行动可更高）；\n"
-    "- routes 是 2~3 条游览路线（副本骨架）：每条有 name/brief 与 3~5 步有序 steps，"
-    "步骤串联「见某 NPC → 接某任务 → 去某地点 → 达成某目标」，必须走得通；\n"
+    "- 时间事件表 time_events（9.1，强烈建议）：玩家分批投入时间（每次 15 分钟）推进任务时，"
+    "跨过触发点就会演出一个中途事件——给时长≥30 分钟的任务预埋 1~2 个，让「投入时间」"
+    "真的有戏可看，而不是让玩家靠任务提示脑补发生了什么。格式："
+    "[{\"at_minute\": 15, \"text\": \"旁白文案（具体呈现玩家看见/发现/遭遇了什么，有画面有细节）\", "
+    "\"give_item\": \"物品名（可选，直接进玩家背包）\", \"item_note\": \"一句话描述（give_item 未在 "
+    "items 表注册时必填）\", \"set_flags\": {\"键\": true}（可选，供任务条件引用）}]；"
+    "at_minute 用任务内累计投入分钟（15/30/45…15 的倍数）；"
+    "如调查任务可在 15 分钟触发「发现线索」并 give_item，45 分钟触发「遭遇变故」并 set_flags；\n"
     "- milestones 按 order 升序，trigger 用与 done_flags 相同的条件写法；\n"
     "- endings 是 2~3 个分岔终局：condition 用同样的条件写法，彼此覆盖不同玩家路线"
     "（如：信任方舟信号→生还；揭穿真相→内乱；时间耗尽→失败），ending_text 各有有余味的收束；\n"
     "- quest 的 state 固定从 \"undiscovered\" 起步；\n"
+    "- items 是关键物品表（2~5 个）：id 用中文短名（将作为背包系统注册表，全剧唯一、"
+    "一字不差引用）、type 是类别（信物/工具/消耗品/线索/危险物等）、"
+    "desc 一句话描述、key=true 表示剧情关键道具；任务奖励是实物时写 reward_items 数组"
+    "（取自 items 的 id），完成后程序自动放进玩家背包；"
+    "线索类物品优先做成「纸条/字条/信件」形态（type=纸条，desc 写内容全文，如承诺字据、"
+    "密码便签、简图字条）——纸条拿在手上 NPC 能读到内容，玩家可与 NPC 当面对质（物品化）；\n"
     "- 除 id 外全部为中文；正文有血有肉，不允许留空字符串。"
 )
 
@@ -533,43 +576,64 @@ BUILDER_FEW_SHOT_EXAMPLE = (
     '    {"id": "s2", "content": "柳眉并非寻常歌女，她是巡查御史安插在客栈的眼线",'
     ' "holders": ["n2"], "reveal_hint": "她哼的小曲是官话切口，字字押着御使衙门的韵"}\n'
     "  ],\n"
+    '  "items": [\n'
+    '    {"id": "半块虎符", "type": "信物", "desc": "柳眉交出的御史信物，可号令临安暗桩", "key": true},\n'
+    '    {"id": "密写账册", "type": "线索", "desc": "沈默随身携带的账册，蘸米水可显字", "key": true}\n'
+    "  ],\n"
     '  "quests": [\n'
-    '    {"id": "q1", "name": "夜探地窖", "giver": "n2",'
+    '    {"id": "q1", "name": "夜探地窖", "giver": "n2", "type": "push", "next": "q2",'
     ' "complete_condition": "确认官银确实藏在地窖，并取得一件能指认掌柜的信物",'
     ' "accept_flags": "met_npc_n2==true", "done_flags": "knows_secret_s1==true",'
-    ' "time_cost_minutes": 60, "reward": "柳眉交出半块虎符，与你结成同盟", "state": "undiscovered"},\n'
-    '    {"id": "q2", "name": "稳住掌柜", "giver": "n2",'
-    ' "complete_condition": "在掌柜面前不动声色地拖住他，让柳眉顺利取回身契",'
-    ' "accept_flags": "quest_q1_state==active", "judge_mode": "time",'
-    ' "done_flags": "milestone_q2_time_ready==true && milestone_q2_reported==true",'
-    ' "time_cost_minutes": 30, "reward": "柳眉告诉你衙门口暗桩的换岗时辰", "state": "undiscovered"}\n'
-    "  ],\n"
-    '  "routes": [\n'
-    '    {"id": "r1", "name": "侠义线·翻案", "brief": "帮柳眉取回身契，把官银案捅到御史衙门",'
-    ' "steps": ["在大堂会柳眉听她半句警告", "接下夜探地窖的任务", "潜入地窖看清官银与信物",'
-    ' "去衙门口递出虎符翻案"]},\n'
-    '    {"id": "r2", "name": "江湖线·分银", "brief": "与掌柜做交易，趁乱分一笔官银走人",'
-    ' "steps": ["陪掌柜喝酒套他的底", "让他知道你已看见地窖的东西", "与他谈分成并立字据",'
-    ' "天亮前带银子出城"]}\n'
+    ' "time_cost_minutes": 60, "reward": "柳眉交出半块虎符，与你结成同盟",'
+    ' "time_events": ['
+    '{"at_minute": 15, "text": "地窖角落的酒坛被你碰倒，坛底压着一枚生锈的铜钥匙，'
+    '齿痕还新——最近有人开过这把锁", "give_item": "生锈铜钥匙", "item_note": "地窖酒坛下'
+    '找到的铜钥匙，齿痕崭新"},'
+    '{"at_minute": 45, "text": "头顶传来木板吱呀声，有人在地窖口站了很久，又轻轻把盖子合上了"'
+    ', "set_flags": {"milestone_q1_seen_shadow": true}}'
+    ' ],'
+    ' "reward_items": ["半块虎符"], "state": "undiscovered"},\n'
+    '    {"id": "q2", "name": "天平的两端", "giver": "n2", "type": "branch",'
+    ' "branch": {"q3a": "侠义走向——递虎符给御史暗桩，把官银案捅上去",'
+    ' "q3b": "江湖走向——拿账册与掌柜谈分成，趁夜分银出城"},'
+    ' "complete_condition": "官银就在眼前，掌柜的银子与柳眉的冤屈摆在天平两端——'
+    '你是替她把案子捅上去，还是跟他做这笔买卖？选择已定，无人能替你回头",'
+    ' "accept_flags": "knows_secret_s1==true", "judge_mode": "flags",'
+    ' "time_cost_minutes": 30, "reward": "你做出了选择，江湖从此多了一条你走定的路",'
+    ' "state": "undiscovered"},\n'
+    '    {"id": "q3a", "name": "雨夜递符", "giver": "n2", "type": "push",'
+    ' "complete_condition": "把半块虎符送到衙门口暗桩手上，约好卯时接应柳眉",'
+    ' "accept_flags": "choice_q2==q3a", "judge_mode": "flags",'
+    ' "done_flags": "milestone_q3a_letter_sent==true",'
+    ' "time_cost_minutes": 45, "reward": "御史亲笔担保状到手，柳眉的身契有救了",'
+    ' "state": "undiscovered"},\n'
+    '    {"id": "q3b", "name": "分银立契", "giver": "n1", "type": "push",'
+    ' "complete_condition": "与掌柜谈妥分成并立下字据，把属于你的那份银子藏进随行箱笼",'
+    ' "accept_flags": "choice_q2==q3b", "judge_mode": "time",'
+    ' "done_flags": "milestone_q3b_time_ready==true && milestone_q3b_reported==true",'
+    ' "time_cost_minutes": 60, "reward": "一袋沉甸甸的官银，和一张再也不能回头的字据",'
+    ' "state": "undiscovered"}\n'
     "  ],\n"
     '  "milestones": [\n'
     '    {"id": "m1", "order": 1, "trigger": "quest_q1_state==active",'
     ' "narration_brief": "子时刚过，后院传来一声闷响，像木箱落了地。一线灯火贴着墙根一闪而逝。"},\n'
     '    {"id": "m2", "order": 2, "trigger": "knows_secret_s1==true",'
-    ' "narration_brief": "你终于看清：腌菜坛子底下，是码得整整齐齐的官银。雨，忽然停了。"}\n'
+    ' "narration_brief": "你终于看清：腌菜坛子底下，是码得整整齐齐的官银。雨，忽然停了。"},\n'
+    '    {"id": "m3", "order": 3, "trigger": "quest_q2_state==done",'
+    ' "narration_brief": "天平倾斜的那一刻，谁也没有听见声音——但每个人都将听见它的回响。"}\n'
     "  ],\n"
     '  "endings": [\n'
-    '    {"id": "e1", "title": "夜雨翻案", "condition": "quest_q1_state==done && quest_q2_state==done",'
+    '    {"id": "e1", "title": "夜雨翻案", "condition": "quest_q3a_state==done",'
     ' "ending_text": "官银案发，临安夜雨连江。你把虎符交到御史手上，柳眉站在檐下朝你一点头——'
     '她自由了，你走进了天亮的临安。"},\n'
-    '    {"id": "e2", "title": "江湖夜行", "condition": "knows_secret_s1==true && met_npc_n1==true",'
-    ' "ending_text": "你和陈四海在后门击掌为誓，各背一半官银消失在雨巷。江湖上从此多了两个'
-    '没有名字的有钱人。"},\n'
+    '    {"id": "e2", "title": "江湖夜行", "condition": "quest_q3b_state==done",'
+    ' "ending_text": "你和陈四海在后门击掌为誓，各背一半官银消失在雨巷。柳眉的名字，'
+    '从此只是你酒后的一个短语。"},\n'
     '    {"id": "e3", "title": "困守空楼", "condition": "quest_q1_state==failed",'
     ' "ending_text": "地窖的火把熄了，官兵围住了客栈。你到底还是晚了一步——临安的雨，'
     '下到天明也没有停。"}\n'
     "  ],\n"
-    '  "ending_text": "官银案发，临安夜雨连江。你与柳眉分道出城——她去衙门翻案，你带着虎符，走进江湖。"\n'
+    '  "ending_text": "官银案发，临安夜雨连江。天平倒向哪一边，你心里清楚——临安的雨，只淋走路上的。"\n'
     "}\n"
     "```"
 )
@@ -597,8 +661,10 @@ CRITIC_STORY_SYSTEM = (
     "met_npc_*/quest_*_state）、accept_flags 与开场节奏是否匹配、time_cost_minutes "
     "是否与任务量级相称、player/clock 初始值是否合理、NPC 与玩家初始地点是否都在 "
     "locations 白名单内且玩家开局地点有 NPC 在场；\n"
-    "6. 终局分岔与路线：endings 是否 2~3 个且条件可区分、覆盖不同玩家路线；routes "
-    "是否 2~3 条、步骤链走得通且与任务/NPC/地点咬合。\n"
+    "6. 终局与任务编排：endings 是否 2~3 个且条件可区分、覆盖不同玩家路线；任务链是否"
+    "环环咬合（扁平推进链或分支目录树均可，不强制分叉）；若设计了 branch 分叉：分叉是否"
+    "真的两难（各分支走向不同、都值得想选）、分支任务是否完整定义且 accept_flags 正确"
+    "引用 choice_键；push 任务的 next 与 accept_flags 是否指向存在的任务。\n"
     '只输出 JSON：{"score": 0到10的数字, "issues": ["具体可执行的修改建议", ...]}。'
     "issues 最多 5 条，指向具体字段；没有明显问题时给空数组。"
 )
@@ -690,6 +756,11 @@ A3_STORY_STATE_RULE = (
     "或你自己动身离开/到达某地时提议，如 [STATE: location=地热机房, npc_location_n1=地热机房]"
     "（你把玩家带去哪，同轮就必须用这个标签把自己也带过去，否则你会「留在原地」被系统判定不在场；"
     "只许写你自己的编号，地点名与 location 同源一字不差）；没有移动就不要用；\n"
+    "8. 舞台指令（9.2 交流动作）：玩家消息开头括号里的（对某某：施压）（套话）（示好）（沉默）等"
+    "是玩家选定后发出的演出指令——你必须按指令演出这一动作的直接反应：不可无视、不可替换成别的"
+    "动作、不可替玩家加戏改动他的意图；指令后玩家附带的自由台词一并自然融合。玩家手上亮着的物品"
+    "（注入中有「玩家双手」实况）你看得见，可自然注意到并回应。动作的深层后果（好感、心理防线、"
+    "秘密）由导演结算，你只负责把反应演像。\n"
 )
 
 # 8.24 群场剧场模式：整场剧本输出格式规则（与 A3_STORY_SECTION 一同注入）
@@ -712,6 +783,22 @@ A3_STAGE_SCRIPT_RULE = (
 )
 
 # ==================== 8.16 外源世界观资料桥（Research） ====================
+
+# 8.25 检索建议判定（生成前轻量调用）：陌生世界观强烈建议先检索。
+# 调用点: app.py /api/story/research/advice —— 前端点「生成」后、提交 create 之前先问一次，
+# advice=strong 且用户没开检索开关时弹窗建议；判定失败静默降级，不打断生成流程。
+RESEARCH_ADVICE_SYSTEM = (
+    "你是剧情副本生成器的资料顾问。判断用户的世界观设定，AI 是否需要先联网检索真实设定"
+    "资料再生成游戏（AI 只凭自身知识写该世界容易写错专有名词、阵营关系、人物设定）。\n"
+    "判定标准：\n"
+    "- 现实存在的 IP / 作品 / 游戏 / 影视 / 小说世界观（如战锤40K、原神、三体、DND）"
+    "——强烈建议检索；\n"
+    "- 真实历史时期 / 真实地理 / 专业领域（军事、医学、航天、法律）——强烈建议检索；\n"
+    "- 用户自创的世界观 / 日常生活题材 / 常识即可覆盖的设定——不建议检索。\n"
+    "原则：除非你特别有把握「仅凭模型自身知识就能写准该世界的专有名词、阵营、人物关系」，"
+    "否则一律建议检索。\n"
+    '只输出一个 JSON 对象：{"advice": "strong" 或 "optional", "reason": "一句话理由（中文，不超过30字）"}'
+)
 
 # 检索需求清单生成的 system prompt（调我们自己的 LLM，产出主题分组清单；整段下发不 .format()）
 # 调用点: story/story/builder.py -> make_research_prompt
@@ -740,25 +827,36 @@ RESEARCH_PROMPT_TEMPLATE = (
     "【故事类型】{genre}\n\n"
     "【需要查证的主题清单】（必须全部查完，不许挑拣）：\n{brief_block}\n\n"
     "【硬性要求】\n"
-    "1. 全部主题一次查完，在**一次回复**中提交完整结果，不要分批、不要反问；\n"
-    "2. 准确性第一优先级：只写查到的内容；查不到或没把握的，必须写进该主题的 "
+    "1. 先建专名规范表：把会反复出现的专有名词（人物/地点/组织/物品/术语）整理进 "
+    "entities，每项写规范写法、类型、一句话定义；全文所有专名一律用规范写法，"
+    "严禁同一实体出现谐音、别字、简称等变体；\n"
+    "2. 全部主题一次查完，在**一次回复**中提交完整结果，不要分批、不要反问；\n"
+    "3. 准确性第一优先级：只写查到的内容；查不到或没把握的，必须写进该主题的 "
     "\"uncertain\" 字段并注明原因，严禁编造细节冒充已查实；\n"
-    "3. 每个主题的 facts 最多 10 条，每条是一句完整、具体、可直接引用的设定事实；\n"
-    "4. relations 写人物/阵营之间的关系（如 \"A 是 B 的上级\"），没有就给空数组。\n\n"
+    "4. 每个主题的 facts 最多 10 条，每条是一句完整、具体、可直接引用的设定事实；\n"
+    "5. relations 写人物/阵营之间的关系（如 \"A 是 B 的上级\"），没有就给空数组。\n\n"
     "【输出 JSON 契约】你的整条回复只包含下面这一个 JSON 对象（可包裹在 ```json 代码块里）：\n"
     "{{\n"
     "  \"source_model\": \"你的名字或模型名\",\n"
+    "  \"entities\": [\n"
+    "    {{\"name\": \"规范写法\", \"type\": \"人物/地点/组织/物品/术语\", "
+    "\"note\": \"一句话定义\"}}\n"
+    "  ],\n"
     "  \"topics\": [\n"
     "    {{\"topic\": \"主题名（与清单一致）\", \"facts\": [\"事实1\", \"事实2\"], "
     "\"uncertain\": [\"没查实的内容及原因\"], \"relations\": [\"A 是 B 的上级\"]}}\n"
     "  ],\n"
     "  \"notes\": \"其他补充说明，可为空字符串\"\n"
     "}}\n\n"
-    "【提交方式（二选一）】\n"
-    "A. 若你被配置了自定义工具 / MCP 插件：向本服务发起 HTTP POST "
-    "/api/story/research/{job_id}（默认地址 http://localhost:5004，以界面所在主机为准），"
-    "请求体就是上面的 JSON；\n"
-    "B. 否则：把 JSON 全文直接输出给用户，由用户复制回粘贴框提交。"
+    "【提交方式（唯一，必须执行）】\n"
+    "通过本服务的 MCP 工具或 HTTP 接口提交：向 /api/story/research/{job_id} 发起 "
+    "HTTP POST（默认地址 http://localhost:5004，以界面所在主机为准），请求体就是上面的 "
+    "JSON。这是把结果交回来的唯一通道，提交完成后回复一句「已提交」即可，"
+    "不要把 JSON 全文粘贴到对话里。\n\n"
+    "【工作纪律】检索结果一律只用上面【提交方式】写明的方式交付。除这一次提交外："
+    "不要在你的工作空间创建或修改任何文件，不要运行任何系统命令。"
+    "注意：调用 MCP 工具或发送这一次 HTTP 请求不属于禁区——它是唯一允许且必须的"
+    "交付动作；此外的任何文件操作、命令执行一律禁止。"
 )
 
 # 造城 AI：外源检索资料注入块（插在 BUILDER_STORY_USER 的 extra_block 之前）
@@ -766,6 +864,8 @@ RESEARCH_PROMPT_TEMPLATE = (
 RESEARCH_INJECT = (
     "\n\n## 世界资料（经检索核实的官方设定）\n\n"
     "以下为经检索核实的官方设定，**必须严格遵守，不得与之矛盾**；未覆盖细节可自创"
-    "但不得冲突。标注（未查实）的条目可信度存疑，可参考氛围，不要当作确证细节写进关键剧情。\n\n"
+    "但不得冲突。标注（未查实）的条目可信度存疑，可参考氛围，不要当作确证细节写进关键剧情。\n"
+    "若资料含【专名规范表】，所有专有名词的写法一律以该表为准；"
+    "表里没收录的相似名称（谐音、别写、自行变体）一律不用。\n\n"
     "{research_text}\n"
 )
