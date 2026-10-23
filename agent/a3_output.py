@@ -22,10 +22,6 @@ from tools.npc_state import get_npc_state
 
 logger = logging.getLogger("a3_output")
 
-# 9/30 改C：状态标签剥离正则（与 director 侧同规则的独立实现，避免跨包依赖）
-# 覆盖 [STATE: ...]、[NOTE: ...]、[PRIVATE_REQ]、[PRIVATE_REQ: ...] 四种行内标签
-_STATE_TAG_RE = re.compile(r"\[STATE:[^\]]*\]|\[NOTE:[^\]]*\]|\[PRIVATE_REQ[^\]]*\]")
-
 
 class A3OutputAgent:
     """A3 最终输出 Agent"""
@@ -42,27 +38,14 @@ class A3OutputAgent:
         persona: dict = None,
         recent_history: list[dict] = None,
         search_text: str = "",
-        story_section: str = None,
-        director_reminder: str = None,
-        skip_fact_check: bool = False,
-        time_override: str = None,
     ) -> dict:
-        """story_section：剧情副本模式的导演权限门注入段（Director.build_injection 产出）；
-        director_reminder：导演末位提醒（8.20c，动作任务结案要求，拼在 user prompt 最末尾）；
-        skip_fact_check：跳过游戏库反事实重生成（8.24 群场剧场专用——整场剧本若被
-        重生成会破坏 [角色名] 行格式，导致整场被逐行裁空）；
-        time_override：游戏内时间文本（8.24d 双时间修复，副本身份传「第X天 HH:MM」，
-        替代默认的现实时间参考——NPC 只看一套时间）；
-        None = 普通聊天身份，行为与原先完全一致。"""
-        self._time_override = time_override
         mode = a2_result.get("mode", "chat")
         need_external = a2_result.get("need_external_knowledge", False)
         # 三档相关性（A2 分类附带）：world_related / chitchat / irrelevant
         relevance = a2_result.get("relevance", "world_related")
 
         # 全量游戏库（整段作为稳定前缀注入；仅当该身份有游戏数据库时非空）
-        # 剧情副本模式（story_section 非空）跳过固定游戏库前缀，改走动态区的权限门注入段
-        game_db_section = "" if story_section else self._build_game_db_section()
+        game_db_section = self._build_game_db_section()
 
         # ── T-004 教程：仅 knowledge 模式注入；命中(或兜底检索到)才启用教程分支 ──
         tutorial_active = False
@@ -82,13 +65,8 @@ class A3OutputAgent:
             game_db_section=game_db_section,
             tutorial_section=tutorial_section if tutorial_active else "",
             relevance=relevance,
-            story_section=story_section,
         )
         user_prompt = self._build_user_prompt(user_message, recent_history)
-        # 导演末位提醒（8.20c）：拼在 user prompt 最末尾——末位指令遵从率最高，
-        # 用于解决动作任务「汇报确认」标签漏发（注入段位置太靠前被叙事惯性压过）
-        if director_reminder:
-            user_prompt = f"{user_prompt}\n\n{director_reminder}"
 
         try:
             reply = client.chat(
@@ -108,7 +86,7 @@ class A3OutputAgent:
         # T-004: 知识模式教程分支不跑反事实校验（经评估幻觉不严重，靠强提示词兜底）。
         game_db_checked = False
         game_db_revised = False
-        if self._has_game_db() and not tutorial_active and not skip_fact_check:
+        if self._has_game_db() and not tutorial_active:
             try:
                 revised = self._verify_and_revise(reply, system_prompt, user_message)
                 game_db_checked = True
@@ -157,7 +135,6 @@ class A3OutputAgent:
         game_db_section: str = "",
         tutorial_section: str = "",
         relevance: str = "world_related",
-        story_section: str = None,
     ) -> str:
         parts = []
 
@@ -216,13 +193,6 @@ class A3OutputAgent:
                 parts.append("**相关经历（可以参考融入对话）：**\n")
                 for m in other_mems:
                     parts.append(f"- {m.get('summary', '')}\n")
-
-        # 剧情副本模式：记忆区之后追加 [STATE:] 提议标签规则 + 导演权限门注入段
-        # （story_section 已是 Director.build_injection 用 A3_STORY_SECTION.format() 装载好的成品，
-        #   此处直接整段追加；固定前缀区的游戏库段已在 generate() 中跳过）
-        if story_section:
-            parts.append(PROMPTS.A3_STORY_STATE_RULE)
-            parts.append(story_section)
 
         # 搜索/链接内容（知识模式动态段）
         if mode == "knowledge":
@@ -318,57 +288,6 @@ class A3OutputAgent:
         except Exception:
             return False
 
-    def _player_name(self) -> str:
-        """副本存档中的玩家名（校验白名单：NPC 称呼玩家永远不算编造）。
-        9/30 实测：玩家名「沃雅妮莎」被误判为设定外新名词 → 触发无谓重生成。
-        普通身份（非副本）返回空串，行为不变。"""
-        try:
-            from story.store import load_story
-            persona = (load_story(self.identity_name) or {}).get("player_persona") or {}
-            return str(persona.get("name") or "").strip()
-        except Exception:
-            return ""
-
-    def _story_entities(self) -> list[str]:
-        """副本剧本的官方实体名（9/30 改A「上户口」）。
-
-        造城时 critic 审稿通过的剧本 = 官方信任源（行业惯例 approved lore）：
-        NPC 名、地点名、任务名、玩家名全部进入反数据库校验白名单，
-        NPC 提到它们不再被误判为编造。普通身份（非副本）返回空列表，行为不变。
-        """
-        try:
-            from story.store import load_story
-            s = load_story(self.identity_name) or {}
-        except Exception:
-            return []
-        names: list[str] = []
-
-        def _pick(container, *keys):
-            # 兼容两种形态：字符串数组（locations 如 ["悦来客栈大堂"]）与 dict 数组
-            for item in container or []:
-                if isinstance(item, str):
-                    v = item.strip()
-                    if v:
-                        names.append(v)
-                elif isinstance(item, dict):
-                    for k in keys:
-                        v = str(item.get(k) or "").strip()
-                        if v:
-                            names.append(v)
-                            break
-
-        _pick(s.get("npcs"), "name")
-        _pick(s.get("locations"), "name", "key")
-        _pick(s.get("quests"), "name")
-        _pick(s.get("items"), "name")
-        _pick(s.get("props"), "name")
-        persona = s.get("player_persona") or {}
-        pn = str(persona.get("name") or "").strip()
-        if pn:
-            names.append(pn)
-        # 去重 + 过滤单字符噪声
-        return list(dict.fromkeys(n for n in names if len(n) >= 2))
-
     def _build_validation_whitelist(self, db, categories: list[str]) -> str:
         """
         构建反事实校验的"已确认合理"白名单文本（方案 A + 方案 B）。
@@ -391,17 +310,6 @@ class A3OutputAgent:
         # 2) 角色自身名字
         if self.identity_name:
             lines.append(f"- 角色自身: {self.identity_name}")
-        # 2.5) 玩家角色名（9/30：NPC 喊玩家名不算编造）
-        pn = self._player_name()
-        if pn:
-            lines.append(f"- 玩家角色名: {pn}")
-        # 2.6) 剧本官方实体（9/30 改A：造城审稿通过=信任源，上户口）
-        story_ents = self._story_entities()
-        if story_ents:
-            lines.append(
-                "- 本副本官方设定（以下均为剧本正式名词，提到它们不算编造）: "
-                + "、".join(story_ents)
-            )
         # 3) 参考来源（方案 B）
         try:
             ref = db.get_reference()
@@ -480,21 +388,10 @@ class A3OutputAgent:
         # 第 2 步：Python 程序去数据库匹配
         matched, missing = self._match_terms_in_db(db, extracted)
 
-        # 玩家自己提到的词不算 NPC 编造（玩家引入的词汇）；
-        # 玩家角色名 + 剧本官方实体同样豁免（9/30 改A：上户口，造城产物=信任源）
-        player_name = self._player_name()
-        story_ents = self._story_entities()
-
-        def _is_trusted(name: str) -> bool:
-            name = name or ""
-            if player_name and (player_name in name or name in player_name):
-                return True
-            return any(e and (e in name or name in e) for e in story_ents)
-
+        # 玩家自己提到的词不算 NPC 编造（玩家引入的词汇）
         missing_without_player = [
             item for item in missing
             if item.get("name", "") not in (user_message or "")
-            and not _is_trusted(item.get("name", "") or "")
         ]
 
         ok = len(missing_without_player) == 0
@@ -607,8 +504,6 @@ class A3OutputAgent:
         生成后校验 + 反事实重生成链路。
 
         流程：
-          0. 9/30 改C：先剥出 [STATE:]/[NOTE:]/[PRIVATE_REQ] 状态标签，校验与重生成只针对正文，
-             重生成后把原标签原样拼回——防止重生成弄丢任务链标记（星露实测：标签陪伴葬风险）
           1. 抽取 NPC 回复中的游戏词汇，由 Python 去数据库匹配
           2. 全部命中 → 返回 None（无需修正）
           3. 存在库中不存在的事物 → 将「原文 + 必要提示词(原 system prompt) + 修改建议」
@@ -617,13 +512,7 @@ class A3OutputAgent:
         Returns:
             修正后的回复，或 None（未校验/无需修正/无法修订）
         """
-        # 改C：正文/标签解耦
-        tags = _STATE_TAG_RE.findall(reply)
-        body = _STATE_TAG_RE.sub("", reply).strip()
-        if not body:
-            return None  # 全是标签没有正文，没有可校验的事实
-
-        check = self._check_game_db_facts(body, user_message)
+        check = self._check_game_db_facts(reply, user_message)
         if check is None or check.get("ok"):
             return None
 
@@ -634,7 +523,7 @@ class A3OutputAgent:
             return None
         suggestions = "、".join(marked)
         revise_user = PROMPTS.A3_GAME_DB_REVISE_USER.format(
-            original=body,
+            original=reply,
             suggestions=suggestions,
         )
         # 必要提示词（原 system_prompt）+ 修正指令 合并为新的 system prompt
@@ -644,13 +533,8 @@ class A3OutputAgent:
             temperature=0.6,
             max_tokens=4096,
         )
-        revised = _STATE_TAG_RE.sub("", (revised or "").strip()).strip()  # 改C：剥掉模型自己带出的标签
-        if not revised:
-            return None
-        # 改C：把校验前剥出的原标签原样拼回（标签唯一来源=原回复，位置无关）
-        if tags:
-            revised = revised + "\n" + "\n".join(tags)
-        return revised
+        revised = revised.strip()
+        return revised if revised else None
 
     def _build_user_prompt(self, user_message: str, recent_history: list[dict] = None) -> str:
         # 使用持久化的历史记录
@@ -659,18 +543,15 @@ class A3OutputAgent:
             base = user_message
         else:
             recent = history[-6:]
-            # 群场标注说话 NPC 名（8.13）；无 speaker_name 时回退 玩家/NPC
             history_text = "\n".join(
-                f"{('玩家' if m.get('role') == 'user' else (m.get('speaker_name') or 'NPC'))}: "
-                f"{m.get('content', '')[:200]}"
+                f"{'玩家' if m.get('role') == 'user' else 'NPC'}: {m.get('content', '')[:200]}"
                 for m in recent
             )
             base = f"最近对话：\n{history_text}\n\n玩家: {user_message}"
         # 动态上下文（易变内容放 user 消息末尾，保持 system prompt 稳定以命中缓存）：
         # 1) 当前时间（背景参考，降权处理：system 引导「勿强调」，此处措辞用「时间参考」）
-        #    8.24d 双时间修复：副本身份传 time_override（游戏内时间），不再注入现实时间
         # 2) 角色当前状态（玩家手动填写，如"可莉现在在禁闭室"）
-        dynamic = [f"（时间参考：{getattr(self, '_time_override', None) or build_time_context()}）"]
+        dynamic = [f"（时间参考：{build_time_context()}）"]
         npc_state = get_npc_state(self.identity_name)
         if npc_state:
             dynamic.append(f"（角色当前状态：{npc_state}）")

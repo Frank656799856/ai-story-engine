@@ -6,7 +6,8 @@
 流程（build_story）：
   1. 调 LLM 产出副本 JSON（BUILDER_STORY_SYSTEM 网文方法论 + few-shot 范例引导）
   2. validate_story 校验；失败把错误清单回喂修复重试一次，仍失败抛异常
-  3. 审稿循环（CRITIC 打分，score<7 带 issues 修订重生成，最多 2 轮；仍 <7 也接受并记 review_notes）
+  3. 审稿循环（CRITIC 打分；score>=7 且 issues 清零才放行，否则带 issues 修订，最多 2 轮；
+     上限后仍不达标也接受并记 review_notes）
   4. 逐 NPC 建档入库：人物卡（性格/目标/位置 + 所持秘密写进关系描述）写入 game_db，
      并写入 world 与 story_id 关联
   5. 注册新身份（identities.json，格式与原系统 agent/pipeline.create_identity 一致）
@@ -61,6 +62,65 @@ def _to_float(val, default: float) -> float:
 
 # ==================== game_db 建档入库 ====================
 
+def _enrich_npc_profiles(story: dict, on_progress=None) -> None:
+    """9.5 档案补全轮（T-002 关联链填表法移植，灰眸标杆的 AI 代填版）：
+    主干生成+审稿通过后，逐 NPC 一次小调用产出行为化画像（300-500 字）+ 情境示范台词
+    （主 NPC 15 句 / 次要 8 句）。写回 story.npcs[i]（persona_summary / sample_lines），
+    随剧本落盘，由 director.persona_for / build_stage_injection 注入 A3 作风格锚定。
+
+    - 主 NPC 判定：秘密持有人或任务发布人；
+    - 人物/剧情完整性优先于 token（10.16 拍板：优先给最优提示词）；
+    - 单 NPC 失败降级跳过（档案是增益件，不阻塞出本）；
+    - 秘密零泄漏由提示词铁律约束（样本会进 A3 人设前缀区，绕过权限门，绝不能含秘密内容）。
+    """
+    npcs = story.get("npcs") or []
+    if not npcs:
+        return
+    setting = story.get("setting", {})
+    secrets_by_id = {s.get("id"): s for s in story.get("secrets", [])}
+    quests_by_giver = {}
+    for q in story.get("quests", []):
+        giver = q.get("giver", "")
+        if giver:
+            quests_by_giver.setdefault(giver, []).append(
+                f"{q.get('name', '')}（{q.get('complete_condition', '')}）")
+    holders = {h for s in story.get("secrets", []) for h in (s.get("holders") or [])}
+
+    for i, npc in enumerate(npcs):
+        nid = npc.get("id", f"n{i + 1}")
+        name = npc.get("name", nid)
+        if on_progress:
+            on_progress(f"正在补全 {name} 的档案", min(86 + i, 87))
+        is_main = nid in holders or bool(quests_by_giver.get(nid))
+        sec_texts = [secrets_by_id[sid].get("content", "")
+                     for sid in npc.get("known_secrets", []) if secrets_by_id.get(sid)]
+        user = PROMPTS.BUILDER_PROFILE_USER.format(
+            world=(setting.get("world_desc", "") or "")[:800],
+            tone=story.get("tone", "") or "轻快冒险",
+            name=name,
+            personality=npc.get("personality", ""),
+            goal=npc.get("goal", ""),
+            location=npc.get("location", ""),
+            opening=npc.get("opening", ""),
+            secrets="；".join(sec_texts) or "无",
+            quests="；".join(quests_by_giver.get(nid, [])) or "无",
+            n_lines=15 if is_main else 8,
+        )
+        try:
+            raw = client.chat(system_prompt=PROMPTS.BUILDER_PROFILE_SYSTEM,
+                              user_message=user, temperature=0.8, max_tokens=3000)
+            data = _extract_json(raw)
+        except Exception as e:
+            logger.warning(f"NPC 档案补全失败 [{nid}]: {e}（跳过，不影响出本）")
+            continue
+        npc["persona_summary"] = str(data.get("persona_summary", "")).strip()[:1500]
+        raw_lines = data.get("sample_lines")
+        if isinstance(raw_lines, list):
+            npc["sample_lines"] = [str(x).strip()[:150] for x in raw_lines if str(x).strip()]
+        logger.info(f"NPC 档案补全完成 [{nid}] 画像{len(npc.get('persona_summary', ''))}字 "
+                    f"样本{len(npc.get('sample_lines', []))}句")
+
+
 def _fill_game_db(story: dict) -> None:
     """把世界观与逐 NPC 人物卡写入该副本身份的 game_db，并关联 story_id。
 
@@ -78,6 +138,22 @@ def _fill_game_db(story: dict) -> None:
         "description": setting.get("world_desc", ""),
     }
     db.data["story_id"] = story_id
+
+    # 9.5 剧本实体入库：道具 / 地点（原系统分类），为未来 A2 知识问答与 A1 检索消费留接缝
+    for it in story.get("items", []):
+        if not it.get("name", "").strip():
+            continue
+        try:
+            db.add_entry("道具", it.get("name", ""), it.get("desc", ""))
+        except ValueError as e:
+            logger.warning(f"game_db 入库跳过 道具[{it.get('name', '')}]: {e}")
+    for loc in story.get("locations", []):
+        if not loc.get("name", "").strip():
+            continue
+        try:
+            db.add_entry("地点", loc.get("name", ""), loc.get("desc", ""))
+        except ValueError as e:
+            logger.warning(f"game_db 入库跳过 地点[{loc.get('name', '')}]: {e}")
 
     secrets_by_id = {s.get("id"): s for s in story.get("secrets", [])}
     for npc in story.get("npcs", []):
@@ -100,6 +176,14 @@ def _fill_game_db(story: dict) -> None:
         except ValueError as e:
             # 重名 NPC 等情况不中断建档（提示词已要求 NPC 名唯一）
             logger.warning(f"game_db 入库跳过 [{npc.get('name', '')}]: {e}")
+        # 9.5 档案归档：行为画像 + 情境示范台词（灰眸 reference 区结构；当前消费方是
+        # director 注入读剧本 JSON，这里留档供未来 A1/A2 消费）
+        if npc.get("persona_summary") or npc.get("sample_lines"):
+            db.data.setdefault("reference", {})[npc.get("name", "")] = {
+                "source_game": "",
+                "persona_summary": npc.get("persona_summary", ""),
+                "dialogue_samples": npc.get("sample_lines", []),
+            }
     db._save()  # 确保.world/story_id 等非 add_entry 写入也落盘
     logger.info(f"game_db 建档完成 [{story_id}]")
 
@@ -332,10 +416,12 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
         score = _to_float(verdict.get("score"), 10.0)
         issues = verdict.get("issues") if isinstance(verdict.get("issues"), list) else []
         review_notes.append({"round": round_no, "score": score, "issues": issues})
-        if score >= 7:
+        # 10.16：分数达标且 issues 清零才放行——审稿发现的问题（哪怕分数够高）至少修订一轮，
+        # 杜绝 q2/q3 物品时序矛盾「记档放行」的事故复发；仍受 2 轮上限约束，不会死循环
+        if score >= 7 and not issues:
             break
         # 带 issues 修订重生成
-        logger.info(f"审稿第 {round_no} 轮得分 {score} < 7，带 issues 修订重生成")
+        logger.info(f"审稿第 {round_no} 轮得分 {score}（issues {len(issues)} 条），带 issues 修订重生成")
         revise_user = PROMPTS.BUILDER_STORY_FIX_USER.format(
             story_json=json.dumps(story, ensure_ascii=False, indent=2),
             problems="\n".join(f"- {i}" for i in issues) or "-（责编未给出具体问题，请整体润色提升开篇钩子与冲突张力）",
@@ -371,6 +457,9 @@ def build_story(settings: dict, on_progress=None, research=None) -> dict:
     story["research_summary"] = research_summary
     story["review_notes"] = review_notes
     story["state"] = schema.new_state(story)
+
+    # ── 4.5 档案补全轮（9.5）：逐 NPC 行为画像 + 情境示范台词（主干生成后分步补全）──
+    _enrich_npc_profiles(story, on_progress)
 
     # ── 5. 建档入库 + 注册身份 + 落盘 ──
     on_progress("正在为 NPC 建档入库", 88)

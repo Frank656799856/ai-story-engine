@@ -52,46 +52,22 @@ class ConversationHistory:
         with open(self._file, "w", encoding="utf-8") as f:
             json.dump(self._records, f, ensure_ascii=False, indent=2)
 
-    def append(self, role: str, content: str, mode: str = "chat", **extra):
-        """追加一条对话记录。
-
-        8.13 扩展字段（仅剧情副本私聊/群场使用，普通身份不传即行为不变）：
-          speaker       NPC 侧记录说话 NPC 的 id
-          speaker_name  NPC 侧记录说话 NPC 的显示名（上下文标注用）
-          private       True = 私聊消息（其他 NPC 上下文构建时跳过）
-          to            玩家私聊消息的接收 NPC id
-        """
+    def append(self, role: str, content: str, mode: str = "chat"):
         record = {
             "role": role,
             "content": content,
             "mode": mode,
             "timestamp": datetime.now().isoformat(),
         }
-        record.update(extra)
         self._records.append(record)
         self.save()
 
     def get_all(self) -> list[dict]:
         return self._records
 
-    def get_recent(self, count: int = RECENT_HISTORY_COUNT,
-                   for_npc: str = None, public_only: bool = False) -> list[dict]:
-        """获取最近 N 条对话（供 A1 上传给 AI）。
-
-        8.13 过滤规则（隔离靠过滤不靠演技）：
-          for_npc      为该 NPC 构建上下文：跳过其他 NPC 的私聊记录
-                       （user 私聊消息 to=对方、npc 私聊回复 speaker=对方）
-          public_only  只要公开记录（群场 A1/A2 检索用，排除全部私聊内容）
-        """
-        records = self._records
-        if for_npc is not None:
-            records = [
-                r for r in records
-                if not r.get("private") or r.get("to") == for_npc or r.get("speaker") == for_npc
-            ]
-        elif public_only:
-            records = [r for r in records if not r.get("private")]
-        return records[-count:] if records else []
+    def get_recent(self, count: int = RECENT_HISTORY_COUNT) -> list[dict]:
+        """获取最近 N 条对话（供 A1 上传给 AI）"""
+        return self._records[-count:] if self._records else []
 
     def clear(self):
         self._records = []
@@ -113,8 +89,6 @@ class NPCPipeline:
         self.a1 = A1SearchAgent(self.store, self.index)
         self.a2 = A2DeepThinkAgent()
         self.a3 = A3OutputAgent(identity_name)
-        # 剧情副本导演（仅副本身份由 app.py 在首聊前装配；普通身份恒为 None，行为不变）
-        self.director = None
         self.ensure_character_profiled()
 
     # ── 首次启动：从参考对话样本提炼角色画像 ─────────────
@@ -179,12 +153,7 @@ class NPCPipeline:
         except Exception as e:
             logger.warning(f"角色画像提炼失败 [{self.identity_name}]: {e}")
 
-    def chat(self, user_message: str, npc_id: str = None) -> dict:
-        """npc_id：剧情副本模式下当前对话的 NPC（普通身份忽略，保持原行为）。
-        剧情副本走 _story_chat（群场/私聊），普通身份走原流程。"""
-        if self.director is not None:
-            return self._story_chat(user_message, npc_id)
-
+    def chat(self, user_message: str) -> dict:
         logger.info(f"流水线 [{self.identity_name}]: {user_message[:50]}...")
         trace.clear()  # 每轮对话清空追踪
         trace.add("Pipeline", "开始", f"身份={self.identity_name}, 消息={user_message[:60]}")
@@ -212,7 +181,6 @@ class NPCPipeline:
             user_message, a2_result, a3_memories, self.persona,
             recent_history=recent_history,
             search_text=a2_result.get("search_text", ""),
-            story_section=None,
         )
         trace.add("A3-输出", "完成",
                    f"模式={a3_result['mode']}, 回复长度={len(a3_result['reply'])}, "
@@ -223,7 +191,20 @@ class NPCPipeline:
         # 保存 NPC 回复
         self.history.append("npc", a3_result["reply"], a2_result["mode"])
 
-        a4_stats = self._run_a4(a3_result, self.persona)
+        a4_stats = {}
+        if a3_result.get("snapshot"):
+            self.a4 = A4ManagerAgent(self.store, self.index)
+            try:
+                a4_stats = self.a4.manage(a3_result["snapshot"], self.persona)
+                trace.add("A4-管理", "完成",
+                           f"摘要={a4_stats.get('summaries_generated', '?')}, "
+                           f"事件={a4_stats.get('events_detected', '?')}, "
+                           f"创建={a4_stats.get('memories_created', '?')}, "
+                           f"升级={a4_stats.get('promoted', '?')}, "
+                           f"降级={a4_stats.get('demoted', '?')}")
+            except Exception as e:
+                logger.warning(f"A4 失败: {e}")
+                trace.add("A4-管理", "失败", str(e))
 
         return {
             "reply": a3_result["reply"],
@@ -250,280 +231,6 @@ class NPCPipeline:
                 "a3_game_db_revised": a3_result.get("game_db_revised", False),
                 "a4_stats": a4_stats,
             },
-        }
-
-    def _run_a4(self, a3_result: dict, persona: dict, story_brief: str = None,
-                director=None, allow_secret_proposals: bool = True) -> dict:
-        """A4 记忆管理（群场按 NPC 各跑一次；失败不阻塞主流程）。
-
-        8.24d：story_brief 非空时 A4 升级为剧情状态总分析（分区输出），
-        尾区 JSON 提议交 director.apply_ai_proposals 白名单消费——
-        A3 卸下打标包袱，状态提议主通道移至 A4（AI 提议、程序裁决不变）。
-        """
-        if not a3_result.get("snapshot"):
-            return {}
-        a4 = A4ManagerAgent(self.store, self.index)
-        try:
-            # 8.24f：把导演的白名单键清单传给 A4，作为 tool calling 的参数枚举约束
-            hints = None
-            if director is not None:
-                try:
-                    hints = director.allowed_flag_keys()
-                except Exception:
-                    hints = None
-            stats = a4.manage(a3_result["snapshot"], persona,
-                              story_brief=story_brief, state_hints=hints)
-            trace.add("A4-管理", "完成",
-                       f"摘要={stats.get('summaries_generated', '?')}, "
-                       f"事件={stats.get('events_detected', '?')}, "
-                       f"创建={stats.get('memories_created', '?')}, "
-                       f"升级={stats.get('promoted', '?')}, "
-                       f"降级={stats.get('demoted', '?')}")
-            proposals = stats.get("proposals")
-            if proposals and director is not None:
-                changes = director.apply_ai_proposals(
-                    proposals, allow_secrets=allow_secret_proposals)
-                trace.add("A4-状态提议", "消费", f"生效 {len(changes)} 项")
-            return stats
-        except Exception as e:
-            logger.warning(f"A4 失败: {e}")
-            trace.add("A4-管理", "失败", str(e))
-            return {}
-
-    def _story_chat(self, user_message: str, npc_id: str = None) -> dict:
-        """剧情副本对话（8.13 群场广播 + 私聊模式）。
-
-        群场（默认）：与玩家同处一地的全部 NPC 各跑一次 A3、各出一份回答
-        （点名 NPC 排最前）；私聊模式（director.state.private_with）：仅该 NPC 应答，
-        私聊消息打 private 标记，其他 NPC 上下文构建时跳过（隔离靠过滤不靠演技）。
-        """
-        d = self.director
-        logger.info(f"副本流水线 [{self.identity_name}]: {user_message[:50]}...")
-        trace.clear()
-        trace.add("Pipeline", "开始", f"身份={self.identity_name}, 消息={user_message[:60]}")
-
-        notices: list[str] = []      # 程序固定旁白（地点移动/私聊断开等）
-        changes_all: list[str] = []  # 状态变更汇总（调试）
-
-        # ── 响应者集合 ──
-        private_id = d.state.get("private_with")
-        if private_id and private_id not in d.presence_ids():
-            # 防御：私聊对象已不在同地点（如历史遗留状态）→ 自动解除
-            notices.append(d.clear_private(reason="私聊对象已不在同一地点，私聊自动结束。"))
-            private_id = None
-        presence = d.presence_ids()
-        if private_id:
-            responders = [private_id]
-        else:
-            responders = list(presence)
-            if npc_id and npc_id in responders:
-                responders.remove(npc_id)
-                responders.insert(0, npc_id)  # 点名的排前
-            elif npc_id:
-                try:
-                    far_name = d.get_npc(npc_id).get("name", npc_id)
-                    if d.is_dead(npc_id):
-                        notices.append(f"（{far_name} 已经死了，不会再回应）")
-                    else:
-                        notices.append(f"（{far_name} 不在这里，没有听到你的话）")
-                except ValueError:
-                    pass
-
-        # ── 记录玩家消息（私聊打标记）──
-        self.history.append("user", user_message, private=bool(private_id),
-                            to=private_id if private_id else None)
-
-        # ── 无人在场：不调 LLM，玩家可通过地点切换移动 ──
-        if not responders:
-            notices.append("四周静悄悄的，这里没有其他人。")
-            changes, events = d.finalize()
-            notices.extend(d.take_quest_notices())
-            d.save()
-            return self._story_result([], notices, changes_all + changes, [], d,
-                                      mode="chat", deep_think=False, debug={})
-
-        # ── A1/A2 每轮只跑一次（全 responder 共享检索结果，省 token）──
-        if private_id:
-            hist_for_ai = self.history.get_recent(RECENT_HISTORY_COUNT, for_npc=private_id)
-        else:
-            hist_for_ai = self.history.get_recent(RECENT_HISTORY_COUNT, public_only=True)
-        a1_result = self.a1.search(user_message, recent_history=hist_for_ai)
-        trace.add("A1-搜索", "完成",
-                   f"关键词={a1_result['keywords']}, 候选={a1_result['candidate_count']}条, "
-                   f"LLM重排={a1_result.get('llm_reranked', False)}, 历史={a1_result.get('history_count', 0)}条")
-        a2_result = self.a2.process(user_message, a1_result, identity_name=self.identity_name)
-        trace.add("A2-思考", "完成",
-                   f"模式={a2_result['mode']}, 深度思考={'是' if a2_result['deep_think_used'] else '否'}, "
-                   f"筛选={len(a2_result['filtered_ids'])}条, "
-                   f"教程命中={len(a2_result.get('tutorial_hits', []) or [])}条")
-        a3_memories = self.a1.format_for_a3(a1_result, a2_result["filtered_ids"])
-
-        # ── 8.24 群场剧场模式（≥2 NPC 在场且非私聊）：单次调用整场剧本 ──
-        # 私聊/单聊维持原逐 NPC 路径：各自人设 + 各自权限门注入 + 各自一份回答
-        replies: list[dict] = []
-        private_requests: list[dict] = []
-        if not private_id and len(responders) >= 2:
-            story_section = d.build_stage_injection(responders)
-            trace.add("导演", "权限门",
-                      f"剧场模式, 在场={len(responders)}, 注入段长度={len(story_section)}")
-            # 剧场调用以「演出者」身份驱动，各角色人设走注入段（行格式由 A3_STAGE_SCRIPT_RULE 约束）
-            stage_persona = {
-                "name": "群像剧场演出者",
-                "personality": "你本轮同时扮演注入中列出的全部在场角色，按各角色性格切换口吻",
-                "world_setting": d.story.get("setting", {}).get("world_desc", ""),
-            }
-            a3_result = self.a3.generate(
-                user_message, a2_result, a3_memories, stage_persona,
-                recent_history=hist_for_ai,
-                search_text=a2_result.get("search_text", ""),
-                story_section=story_section,
-                director_reminder=d.end_prompt_reminder(),
-                skip_fact_check=True,
-                time_override=d.clock_text(),
-            )
-            trace.add("A3-输出", "完成",
-                      f"剧场整场剧本, 原始长度={len(a3_result['reply'])}")
-            # 逐行校验分发（不在场裁行/标签按行角色分发/节奏硬限裁切）
-            staged = d.apply_stage_reply(a3_result["reply"], responders)
-            replies = staged["replies"]
-            private_requests = staged["private_requests"]
-            notices.extend(staged["notices"])
-            changes_all.extend(staged["changes"])
-            # 同步清洗 A3 内部对话历史（整场剧本带说话人与状态标签，防回流后续提示词）
-            if self.a3.conversation_history and \
-                    self.a3.conversation_history[-1].get("role") == "assistant":
-                self.a3.conversation_history[-1]["content"] = "\n".join(
-                    f"{it['name']}: {it['reply']}" for it in replies)
-            # 逐行：历史记录 + A4 记忆（快照按行角色手工构造）
-            for item in replies:
-                item["stage"] = True  # 前端标记：纯文本渲染 + 间隔弹出
-                self.history.append("npc", item["reply"], a2_result["mode"],
-                                    speaker=item["npc_id"], speaker_name=item["name"])
-                snap = {
-                    "user_message": user_message,
-                    "npc_reply": item["reply"],
-                    "summary_hint": (
-                        f"用户: {user_message[:60]} | NPC: {item['name']}: {item['reply'][:60]}"
-                    ),
-                    "mode": a2_result["mode"],
-                    "relevance": a2_result.get("relevance", "world_related"),
-                    "memories_used": [],
-                    "time_context": d.clock_text(),
-                }
-                self._run_a4({"snapshot": snap}, d.persona_for(item["npc_id"]),
-                             story_brief=d.state_brief_for_ai(),
-                             director=d, allow_secret_proposals=False)
-        else:
-            for rid in responders:
-                npc = d.get_npc(rid)
-                persona = d.persona_for(rid)
-                story_section = d.build_injection(rid)
-                trace.add("导演", "权限门", f"NPC={rid}, 注入段长度={len(story_section)}")
-                # 私聊时全场只有该 NPC，历史过滤等价；群场按 NPC 过滤他人私聊
-                recent_history = (hist_for_ai if private_id
-                                  else self.history.get_recent(RECENT_HISTORY_COUNT, for_npc=rid))
-                a3_result = self.a3.generate(
-                    user_message, a2_result, a3_memories, persona,
-                    recent_history=recent_history,
-                    search_text=a2_result.get("search_text", ""),
-                    story_section=story_section,
-                    director_reminder=d.end_prompt_reminder(),
-                    time_override=d.clock_text(),
-                )
-                trace.add("A3-输出", "完成",
-                          f"NPC={rid}, 回复长度={len(a3_result['reply'])}")
-
-                # 后置解析：剥 [STATE:]/[PRIVATE_REQ]/[NOTE:] 标签 → 白名单应用 flags/玩家地点
-                parsed = d.apply_reply(a3_result["reply"], npc.get("name", rid), npc_id=rid)
-                clean = parsed["clean"]
-                changes_all.extend(parsed["changes"])
-                notices.extend(parsed["notices"])
-                # [NOTE:] 重要信息入冒险手册（含时钟快照，去重后落盘）
-                d.add_notes(npc.get("name", rid), parsed.get("notes", []))
-                # 8.20c 兜底结算：时间投满的动作任务，与发布人过完任意一轮对话
-                # 即由程序确认汇报（AI 本轮主动提议过则跳过），玩家不必反复口头汇报
-                notices.extend(d.auto_settle_report(rid))
-                # 同步清洗 A3 内部对话历史，防标签回流到后续提示词
-                if self.a3.conversation_history and \
-                        self.a3.conversation_history[-1].get("role") == "assistant":
-                    self.a3.conversation_history[-1]["content"] = clean
-                a3_result["reply"] = clean
-                # snapshot 的 npc_reply 一并替换——A4 记忆摘要绝不进标签
-                if isinstance(a3_result.get("snapshot"), dict):
-                    a3_result["snapshot"]["npc_reply"] = clean
-                    # 8.24d 双时间修复：A4 摘要用游戏内时间，不再泄漏现实日期
-                    a3_result["snapshot"].setdefault("time_context", d.clock_text())
-
-                replies.append({"npc_id": rid, "name": npc.get("name", rid), "reply": clean})
-
-                # 记录 NPC 回复（私聊打 private + speaker 标记）
-                self.history.append(
-                    "npc", clean, a2_result["mode"],
-                    speaker=rid, speaker_name=npc.get("name", rid),
-                    private=bool(private_id),
-                    to=private_id if private_id else None,
-                )
-
-                if parsed["private_requests"] and not private_id:
-                    private_requests.append({"npc_id": rid, "name": npc.get("name", rid)})
-
-                # 8.24d：A4 升级为状态总分析（主区玩家状态 + 尾区 JSON 提议交导演白名单）
-                self._run_a4(a3_result, persona,
-                             story_brief=d.state_brief_for_ai(),
-                             director=d)
-
-        # ── 8.24b 兜底「出过台词即相识」：本轮真的对玩家说过话的 NPC，程序直接记相识 ──
-        # （单聊/剧场两路共用；相识是照面级别的确定事实，不依赖 AI 打标）
-        d.auto_meet([r["npc_id"] for r in replies])
-
-        # ── 程序判定：任务 accept/done flags → 里程碑 → 多终局（先满足先生效）──
-        changes, events = d.finalize()
-        changes_all.extend(changes)
-        # 任务跃迁系统提示（接取/可完成/失败）拼进 notices 给玩家看
-        notices.extend(d.take_quest_notices())
-        d.save()
-
-        # 旁白只在剧情推进（里程碑触发）时生成；任何失败静默降级为空串
-        narration = ""
-        if events:
-            try:
-                from story import narrator
-                narration = narrator.narrate(events, d.story)
-            except Exception as e:
-                logger.warning(f"旁白生成失败（降级为空）: {e}")
-                narration = ""
-
-        return self._story_result(
-            replies, notices, changes_all, private_requests, d,
-            mode=a2_result["mode"], deep_think=a2_result.get("deep_think_used", False),
-            narration=narration,
-            debug={
-                "a1_candidates": a1_result["candidate_count"],
-                "a1_keywords": a1_result["keywords"],
-                "a2_mode": a2_result["mode"],
-                "a2_filtered": len(a2_result["filtered_ids"]),
-                "responders": [r["npc_id"] for r in replies],
-                "changes": changes_all,
-            },
-        )
-
-    def _story_result(self, replies: list, notices: list, changes: list,
-                      private_requests: list, director, mode: str, deep_think: bool,
-                      narration: str = "", debug: dict = None) -> dict:
-        """剧情副本统一返回结构（replies 多说话人；reply 为首条兼容字段）。"""
-        story_state = director.get_public_state()
-        return {
-            "reply": replies[0]["reply"] if replies else "",
-            "replies": replies,
-            "notices": notices,
-            "changes": changes,
-            "private_requests": private_requests,
-            "narration": narration,
-            "mode": mode,
-            "deep_think_used": deep_think,
-            "story_state": story_state,
-            "ended": bool(story_state.get("ended")),
-            "debug": debug or {},
         }
 
     def get_history(self) -> list[dict]:

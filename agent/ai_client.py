@@ -521,7 +521,6 @@ class AIClient:
                 if "usage" in result:
                     token_stats.update(result["usage"])
                 elapsed = (time.time() - t0) * 1000
-                self._log_call(messages, content, elapsed)
                 _record_trace(messages, content, elapsed)
                 return content
             except requests.exceptions.HTTPError as e:
@@ -561,109 +560,6 @@ class AIClient:
             except Exception as e:
                 raise RuntimeError(f"API调用失败: {str(e)}")
 
-    def _log_call(self, messages: list[dict], content: str, elapsed_ms: float):
-        """8.24b 全局文件日志埋点：每次 LLM 调用记录耗时/出入规模/调用方线索。
-
-        调用方通过系统提示词前 50 字识别（各 Agent 的 system prompt 开头各不相同）；
-        用户消息取末尾 80 字（最接近玩家本轮输入）。失败路径已有 warning/error 落盘。
-        """
-        try:
-            sys_head = ""
-            for m in messages:
-                if m.get("role") == "system":
-                    sys_head = str(m.get("content", ""))[:50].replace("\n", " ")
-                    break
-            user_tail = ""
-            in_chars = 0
-            for m in reversed(messages):
-                c = str(m.get("content", ""))
-                in_chars += len(c)
-                if m.get("role") == "user" and not user_tail:
-                    user_tail = c[-80:].replace("\n", " ")
-            logger.info(
-                f"🤖 LLM调用完成: 模型={self.model_name} 耗时={elapsed_ms:.0f}ms "
-                f"入={in_chars}字 出={len(content)}字 | 系统[{sys_head}] | 用户尾[{user_tail}]"
-            )
-        except Exception:
-            pass  # 日志埋点失败不影响主流程
-
-    def chat_with_tools(
-        self,
-        system_prompt: str = "",
-        user_message: str = "",
-        tools: list = None,
-        tool_choice: str = "auto",
-        temperature: float = None,
-        max_tokens: int = None,
-    ) -> tuple:
-        """8.24f：带 function calling 的调用（OpenAI 兼容协议）。
-
-        返回 (content, tool_calls)：
-          content     助手正文（可能为空串——模型可以只调工具不说话）
-          tool_calls  [{"name": 工具名, "arguments": dict}, ...]
-                      arguments 已 json.loads；解析失败时保留原始字符串交调用方容错
-        仅剧情状态总分析（A4 打标协议化）使用；现有 chat()/chat_stream() 一行未动，
-        普通身份调用零影响。重试策略与 chat() 一致（429/5xx 指数退避 + 超时/连接重置重试）。
-        """
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_message})
-
-        payload = self._build_payload(messages, temperature, max_tokens, stream=False)
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice or "auto"
-        url = f"{self.base_url}/chat/completions"
-
-        t0 = time.time()
-        self._throttle()
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = requests.post(url, headers=self._build_headers(), json=payload, timeout=self.timeout)
-                response.raise_for_status()
-                result = response.json()
-                message = result["choices"][0]["message"]
-                content = (message.get("content") or "").strip()
-                calls = []
-                for tc in message.get("tool_calls") or []:
-                    fn = tc.get("function") or {}
-                    raw_args = fn.get("arguments", "")
-                    try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args else {}
-                    except json.JSONDecodeError:
-                        args = raw_args  # arguments 不是合法 JSON → 保留原文交调用方容错
-                    calls.append({"name": fn.get("name", ""), "arguments": args})
-                if "usage" in result:
-                    token_stats.update(result["usage"])
-                elapsed = (time.time() - t0) * 1000
-                self._log_call(messages, content + f" [tools={len(calls)}]", elapsed)
-                _record_trace(messages, content, elapsed)
-                return content, calls
-            except requests.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response is not None else 0
-                if status in (400, 401, 403, 404):
-                    raise RuntimeError(f"HTTP错误({status}): {e}")
-                wait = 1 << (attempt - 1)
-                if attempt < max_attempts:
-                    logger.warning(f"chat_with_tools HTTP {status}，第 {attempt}/{max_attempts} 次，{wait}s 后重试...")
-                    time.sleep(wait)
-                    continue
-                raise RuntimeError(f"HTTP错误: {e}")
-            except requests.exceptions.Timeout:
-                if attempt < max_attempts:
-                    logger.warning(f"chat_with_tools 超时，第 {attempt}/{max_attempts} 次，重试中...")
-                    time.sleep(1)
-                    continue
-                raise RuntimeError(f"API调用超时 ({self.timeout}s)")
-            except requests.exceptions.ConnectionError as e:
-                if attempt < max_attempts:
-                    logger.warning(f"chat_with_tools 连接错误，第 {attempt}/{max_attempts} 次，重试中...")
-                    time.sleep(1)
-                    continue
-                raise RuntimeError(f"连接错误: {str(e)}")
-
     def chat_stream(
         self,
         system_prompt: str = "",
@@ -688,8 +584,6 @@ class AIClient:
 
         self._throttle()
         try:
-            in_chars = sum(len(str(m.get("content", ""))) for m in messages)
-            logger.info(f"🤖 LLM流式调用开始: 模型={self.model_name} 入={in_chars}字")
             response = requests.post(url, headers=self._build_headers(), json=payload, timeout=self.timeout, stream=True)
             response.raise_for_status()
             for line in response.iter_lines():

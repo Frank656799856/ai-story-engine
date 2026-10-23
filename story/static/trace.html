@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>推理日志 — AI NPC 记忆系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', monospace;
+            background: #0d1117; color: #c9d1d9; padding: 20px;
+            min-height: 100vh;
+        }
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 16px; padding: 10px 16px; background: #161b22;
+            border-radius: 8px; border: 1px solid #30363d;
+        }
+        .header h1 { font-size: 16px; color: #58a6ff; }
+        .header .nav { display: flex; gap: 8px; }
+        .header .nav a {
+            color: #8b949e; text-decoration: none; font-size: 12px;
+            padding: 4px 10px; border-radius: 4px; border: 1px solid #30363d;
+        }
+        .header .nav a:hover { color: #c9d1d9; border-color: #58a6ff; }
+        .controls {
+            display: flex; gap: 10px; margin-bottom: 16px; align-items: center;
+        }
+        .controls button {
+            padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d;
+            background: #161b22; color: #c9d1d9; cursor: pointer; font-size: 12px;
+        }
+        .controls button:hover { border-color: #58a6ff; }
+        .controls button.active { background: #1f6feb; border-color: #1f6feb; }
+        .controls label { font-size: 12px; color: #8b949e; cursor: pointer; }
+        .controls input[type=checkbox] { margin-right: 4px; }
+        .stats {
+            display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;
+        }
+        .stat-card {
+            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+            padding: 10px 16px; min-width: 100px;
+        }
+        .stat-card .val { font-size: 22px; font-weight: bold; color: #58a6ff; }
+        .stat-card .lbl { font-size: 11px; color: #8b949e; }
+        .trace-container { display: flex; flex-direction: column; gap: 6px; }
+        .trace-entry {
+            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+            padding: 10px 14px; font-size: 12px;
+        }
+        .trace-entry .entry-header {
+            display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+        }
+        .trace-entry .agent-tag {
+            padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;
+        }
+        .ag-Pipeline { background: #1f6feb; color: #fff; }
+        .ag-A1-搜索 { background: #238636; color: #fff; }
+        .ag-A2-思考 { background: #9c6ade; color: #fff; }
+        .ag-A3-输出 { background: #d29922; color: #fff; }
+        .ag-A4-管理 { background: #da3633; color: #fff; }
+        .ag-LLM { background: #30363d; color: #8b949e; }
+        .trace-entry .step { color: #58a6ff; font-weight: bold; }
+        .trace-entry .time { color: #484f58; font-size: 10px; margin-left: auto; }
+        .trace-entry .detail { color: #8b949e; margin-top: 2px; }
+        .trace-entry .llm-block {
+            margin-top: 8px; padding: 8px; background: #0d1117;
+            border-radius: 6px; border: 1px solid #21262d; max-height: 300px; overflow-y: auto;
+        }
+        .trace-entry .llm-block .llm-label {
+            font-size: 10px; color: #484f58; margin-bottom: 4px; text-transform: uppercase;
+        }
+        .trace-entry .llm-block pre {
+            white-space: pre-wrap; word-break: break-all; font-size: 11px;
+            color: #c9d1d9; line-height: 1.5; margin: 4px 0;
+        }
+        .empty { text-align: center; padding: 40px; color: #484f58; font-size: 14px; }
+        .empty .icon { font-size: 40px; margin-bottom: 10px; }
+        .agent-stats {
+            display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;
+        }
+        .agent-stat {
+            font-size: 10px; padding: 2px 6px; border-radius: 4px;
+            background: #21262d; color: #8b949e;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>推理日志 — Agent 推理追踪</h1>
+    <div class="nav">
+        <a href="/">← 返回聊天</a>
+    </div>
+</div>
+
+<div class="controls">
+    <button id="btnSummary" class="active" onclick="setMode('summary')">缩略模式</button>
+    <button id="btnDetailed" onclick="setMode('detailed')">详细模式</button>
+    <button onclick="fetchTrace()">刷新</button>
+    <button onclick="clearTrace()" style="border-color:#da3633;color:#da3633;">清空</button>
+    <label><input type="checkbox" id="autoRefresh" checked onchange="toggleAuto()"> 自动刷新 (2s)</label>
+</div>
+
+<div class="stats" id="statsArea"></div>
+
+<div class="trace-container" id="traceArea">
+    <div class="empty">
+        <div class="icon">📋</div>
+        等待对话开始... 发送一条消息后，推理日志将在这里显示。
+    </div>
+</div>
+
+<script>
+let mode = 'summary';
+let autoTimer = null;
+
+function setMode(m) {
+    mode = m;
+    document.getElementById('btnSummary').classList.toggle('active', m === 'summary');
+    document.getElementById('btnDetailed').classList.toggle('active', m === 'detailed');
+    fetchTrace();
+}
+
+function toggleAuto() {
+    const on = document.getElementById('autoRefresh').checked;
+    if (on) {
+        autoTimer = setInterval(fetchTrace, 2000);
+    } else {
+        clearInterval(autoTimer);
+    }
+}
+
+async function fetchTrace() {
+    try {
+        const detailed = mode === 'detailed' ? '1' : '0';
+        const resp = await fetch(`/api/trace?detailed=${detailed}`);
+        const data = await resp.json();
+
+        // 统计
+        const s = data.stats;
+        const api = data.api || {};
+        const hitRate = (api.cache_hit_rate != null)
+            ? (api.cache_hit_rate * 100).toFixed(1) + '%'
+            : '-';
+        document.getElementById('statsArea').innerHTML = `
+            <div class="stat-card"><div class="val">${s.total_entries}</div><div class="lbl">总步骤</div></div>
+            <div class="stat-card"><div class="val">${s.llm_calls}</div><div class="lbl">LLM 调用</div></div>
+            <div class="stat-card"><div class="val">${(s.llm_total_time_ms / 1000).toFixed(1)}s</div><div class="lbl">LLM 总耗时</div></div>
+            <div class="stat-card"><div class="val">${hitRate}</div><div class="lbl">缓存命中率</div></div>
+            <div class="stat-card"><div class="val">${api.cache_hit_tokens || 0} / ${api.cache_miss_tokens || 0}</div><div class="lbl">缓存命中/未命中 (tokens)</div></div>
+            <div class="stat-card">
+                <div class="agent-stats">${Object.entries(s.by_agent || {}).map(([k, v]) => `<span class="agent-stat">${k}: ${v}</span>`).join('')}</div>
+                <div class="lbl">各 Agent 步骤数</div>
+            </div>
+        `;
+
+        // 日志列表
+        const entries = data.detailed || data.summary || [];
+        const area = document.getElementById('traceArea');
+        if (!entries.length) {
+            area.innerHTML = '<div class="empty"><div class="icon">📋</div>等待对话开始...</div>';
+            return;
+        }
+
+        area.innerHTML = entries.map(e => {
+            const agClass = e.agent.includes('A1') ? 'ag-A1-搜索' :
+                            e.agent.includes('A2') ? 'ag-A2-思考' :
+                            e.agent.includes('A3') ? 'ag-A3-输出' :
+                            e.agent.includes('A4') ? 'ag-A4-管理' :
+                            e.agent === 'Pipeline' ? 'ag-Pipeline' : 'ag-LLM';
+            let llmHtml = '';
+            if (mode === 'detailed' && e.llm_input) {
+                llmHtml = `
+                    <div class="llm-block">
+                        <div class="llm-label">📥 LLM 输入 (${e.llm_type}, ${e.llm_time_ms}ms)</div>
+                        <pre>${escapeHtml(e.llm_input)}</pre>
+                        <div class="llm-label" style="margin-top:8px;">📤 LLM 输出</div>
+                        <pre>${escapeHtml(e.llm_output)}</pre>
+                    </div>`;
+            }
+            return `<div class="trace-entry">
+                <div class="entry-header">
+                    <span class="agent-tag ${agClass}">${e.agent}</span>
+                    <span class="step">${e.step}</span>
+                    <span class="time">${e.time}</span>
+                </div>
+                <div class="detail">${e.detail}</div>
+                ${llmHtml}
+            </div>`;
+        }).join('');
+
+        area.scrollTop = area.scrollHeight;
+    } catch (e) {
+        document.getElementById('traceArea').innerHTML = '<div class="empty">连接失败</div>';
+    }
+}
+
+async function clearTrace() {
+    await fetch('/api/trace/clear', { method: 'POST' });
+    fetchTrace();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+toggleAuto();
+fetchTrace();
+</script>
+</body>
+</html>

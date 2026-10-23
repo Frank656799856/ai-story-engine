@@ -36,6 +36,10 @@ STATE_TAG_RE = re.compile(r"\[\s*state\s*:\s*([^\]]*?)\s*\]", re.IGNORECASE)
 PRIVATE_REQ_RE = re.compile(r"\[\s*private_req\s*\]", re.IGNORECASE)
 # 匹配 [NOTE: 内容] 冒险手册标签（NPC 向玩家交代的重要信息）
 NOTE_RE = re.compile(r"\[\s*note\s*:\s*([^\]]*?)\s*\]", re.IGNORECASE)
+# 9.4 演出旁白行：行首 [旁白] + 描写（单聊/群场通用，剥离后走旁白通道，不进台词）
+NARRATION_RE = re.compile(r"^\s*\[旁白\]\s*(.+?)\s*$")
+_NARRATION_LINE_MAX = 80      # 单条旁白字数上限
+_NARRATION_LINES_MAX = 3      # 单场/单回复旁白条数上限
 
 # 布尔字面量解析表（标签值统一是小写字符串）
 _TRUE_WORDS = {"true", "1", "yes", "是", "真"}
@@ -384,12 +388,25 @@ class Director:
     def persona_for(self, npc_id: str) -> dict:
         """把该 NPC 转成 pipeline 需要的 persona 字典（键与原系统一致）：
         {name, personality, world_setting}。goal/秘密等不在人设里，走权限门注入。
+        9.5：personality 拼接行为画像 + 情境示范台词（进 A3 system prompt 固定前缀区，
+        风格锚定——原系统灰眸 dialogue_samples/summary 的消费方式）；
+        旧副本无这些字段时行为不变。
         """
         npc = self.get_npc(npc_id)
         setting = self.story.get("setting", {})
+        personality = npc.get("personality", "")
+        prof = npc.get("persona_summary", "")
+        if prof:
+            personality += f"\n\n**行为画像**：{prof}"
+        samples = npc.get("sample_lines") or []
+        if samples:
+            personality += (
+                "\n\n**说话示范**（只用于模仿他的语气、用词习惯和情境反应，"
+                "严禁把示范句当台词复读）：\n- " + "\n- ".join(samples)
+            )
         return {
             "name": npc.get("name", npc_id),
-            "personality": npc.get("personality", ""),
+            "personality": personality,
             "world_setting": setting.get("world_desc", ""),
         }
 
@@ -544,7 +561,7 @@ class Director:
         # 9.2 心理防线档位：A3 台词语气与档位匹配（施压/套话/示意的攻防结果由导演结算）
         stance = self._stance(npc_id)
         lines.append(
-            f"- 你在这几轮攻势下的心理防线：{_stance_tone(stance)}——"
+            f"- 你在这几轮攻势下的心理防线：{self._stance_tone(stance)}——"
             f"让台词语气与档位匹配（越接近防线将破，你越守不住自己的秘密）；"
             f"严禁向玩家报出任何数值"
         )
@@ -620,6 +637,16 @@ class Director:
         if inv_block:
             lines.append(inv_block)
 
+        # 9.4 单聊输出格式：可选演出旁白行 + 台词（描写与表演分区，旁白走独立通道）
+        lines.append(
+            "### 输出格式（演出旁白）\n"
+            "- 你的回复 = 可选旁白行 + 台词正文。旁白行格式：`[旁白]描写文字`（最多 2 条，每条一句）\n"
+            "- 旁白只写可观察的：你的动作神态、周围环境、天气、物件状态；绝不写任何人的内心想法\n"
+            "- 有信息量才写（你做了什么动作、周围有新动静、玩家该看见什么），日常寒暄可以完全不写\n"
+            "- 环境是信息通道：玩家不知道但会影响判断的动静（有人靠近、远处烟尘、东西不见了），"
+            "优先用旁白呈现，别默认玩家已经知道\n"
+        )
+
         npc_block = "\n".join(lines)
 
         # 4) 玩家 flags 摘要（共用块；秘密只给 id 与是否已知，绝不给未揭示内容）
@@ -677,6 +704,16 @@ class Director:
             att = self._attitude(rid)
             lines.append(f"\n#### 角色：{nm}（编号 {rid}）")
             lines.append(f"- 性格基调：{npc.get('personality', '')}")
+            # 9.5 档案补全：行为画像 + 说话示范（群场精简版——画像全文 + 前 4 句样本）
+            prof = npc.get("persona_summary", "")
+            if prof:
+                lines.append(f"- 行为画像：{prof}")
+            samples = npc.get("sample_lines") or []
+            if samples:
+                lines.append(
+                    "- 说话示范（模仿语气与用词习惯，严禁当台词复读）："
+                    + " / ".join(samples[:4])
+                )
             lines.append(f"- 核心目标（驱动言行动机，但不必直说）：{npc.get('goal', '')}")
             lines.append(f"- 当前位置：{self.npc_location(rid) or npc.get('location', '')}")
             lines.append(f"- 你的开场白（首次与玩家见面时可用）：{npc.get('opening', '')}")
@@ -746,13 +783,41 @@ class Director:
         notices: list = []
         private_requests: list = []
         total_chars = 0
+        narration_count = 0
         for raw_line in (raw or "").splitlines():
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
+            # 9.4 演出旁白行：剥离走旁白通道（不占台词行数，单独限流防刷屏）
+            nm = NARRATION_RE.match(raw_line)
+            if nm:
+                if narration_count < _NARRATION_LINES_MAX:
+                    text = nm.group(1).strip()[:_NARRATION_LINE_MAX]
+                    if text:
+                        narration_count += 1
+                        notices.append(text)
+                        logger.info(f"演出旁白入账: {text[:40]}")
+                else:
+                    logger.info(f"演出旁白裁掉（条数达上限）: {raw_line[:40]}")
+                continue
             m = STAGE_LINE_RE.match(raw_line)
             if not m:
-                logger.info(f"剧场行裁掉（无说话人标签）: {raw_line[:50]}")
+                # 10.11 修复：无说话人标签的行里可能带 [STATE:] 元数据（模型常把标签
+                # 单独成行，如 "[STATE: knows_secret_s2=true]"）——整行湮灭会导致全局键
+                # 丢失。收割后再丢弃：个人键（npc_learned_/mood_/npc_location_）因无归属
+                # NPC（npc_id=""）被 apply_reply 拒绝；knows_secret 群场禁揭示
+                # （allow_secrets=False），与行内标签同权，不破群场零泄漏设计。
+                if STATE_TAG_RE.search(raw_line):
+                    parsed = self.apply_reply(raw_line, npc_name="", npc_id="",
+                                              allow_secrets=False)
+                    changes.extend(parsed["changes"])
+                    notices.extend(parsed["notices"])
+                    if parsed["changes"]:
+                        logger.info(f"剧场行收割独立状态标签: {raw_line[:50]}")
+                    else:
+                        logger.info(f"剧场行裁掉（无说话人，其中状态标签未过白名单）: {raw_line[:50]}")
+                else:
+                    logger.info(f"剧场行裁掉（无说话人标签）: {raw_line[:50]}")
                 continue
             speaker, body = m.group(1).strip(), m.group(2).strip()
             rid = name_to_id.get(speaker)
@@ -830,6 +895,22 @@ class Director:
         """
         changes: list = []
         notices: list = []
+        # 9.4 演出旁白剥离：单聊回复里的 [旁白] 行直接进旁白通道（不进台词与校验）
+        if reply and "[旁白]" in reply:
+            kept = []
+            narration_lines: list = []
+            for ln in reply.splitlines():
+                nm = NARRATION_RE.match(ln)
+                if nm:
+                    if len(narration_lines) < _NARRATION_LINES_MAX:
+                        text = nm.group(1).strip()[:_NARRATION_LINE_MAX]
+                        if text:
+                            narration_lines.append(text)
+                            logger.info(f"演出旁白入账(单聊): {text[:40]}")
+                    continue
+                kept.append(ln)
+            reply = "\n".join(kept)
+            notices.extend(narration_lines)
         notes = [n.strip() for n in NOTE_RE.findall(reply or "") if n.strip()]
 
         tags = STATE_TAG_RE.findall(reply or "")

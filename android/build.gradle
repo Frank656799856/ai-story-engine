@@ -1,0 +1,8 @@
+// Project-level build file (Groovy)
+// Chaquopy 17.0.0 + AGP 8.7（兼容组合，Chaquopy 文档要求 AGP 7.3.x~9.2.x）
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+    // Kotlin 2.0.21 + Gradle 8.10.2 存在 "state lock" 已知 bug（compileDebugKotlin friendPathsSet），2.1.0 已修复
+    id 'org.jetbrains.kotlin.android' version '2.1.0' apply false
+    id 'com.chaquo.python' version '17.0.0' apply false
+}

@@ -1,16 +1,50 @@
-# 密钥与私密配置（绝不入库）
+# ─── 密钥 & 配置文件 ───
 config.txt
 
-# 复制残留死副本（agent 包嵌套，代码零引用；磁盘暂留，不入库）
-agent/agent/
-
-# 运行时数据：副本存档 / 记忆 / 日志（全部由程序生成）
+# ─── 运行时数据 ───
 data/
+# 保留 identities.json 结构说明（可选）
+!data/identities.json
 
-# Python 缓存
+# ─── Python 缓存 ───
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
 
-# 系统杂项
+# ─── 虚拟环境 ───
+venv/
+.venv/
+env/
+.env
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+# ─── 第三方依赖源码（只读参考，不纳入版本管理） ───
+wanyimem-1.0.6/
+reference/
+
+# ─── IDE 本地配置（Trae skills/缓存） ───
+.trae/
+
+# ─── 本地临时笔记 ───
+/.md
+
+# ─── 遗留文件（不属于本项目） ───
+ai_server.py
+
+# ─── 系统文件 ───
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ─── 日志 ───
+*.log
+logs/
